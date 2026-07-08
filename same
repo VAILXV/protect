@@ -1,0 +1,2158 @@
+--!nocheck
+--!native
+--!optimize 2
+
+-- Alt leave timer (minutes). Allowed values: 2..10 (2, 3, 4, 5, 6, 7, 8, 9, 10)
+-- This controls how long the ALT stays in a game before returning to Lobby.
+local ALT_LEAVE_TIMER = 2 -- minutes
+
+-- Derived duration in seconds used by the in-game loop for the ALT
+local GAME_DURATION = ALT_LEAVE_TIMER * 60
+
+local TWEEN_SETTINGS = {
+    SPEED = 20;
+    STYLE = `Linear`;
+    DIRECTION = `In`;
+}
+
+pcall(function()
+    if not game:IsLoaded() then
+        game.Loaded:Wait()
+    end
+end)
+
+-- Multi-mode controller: optionally chain two modes with a timer for the first phase
+local MULTI_MODE = {
+    ENABLED = false;     -- set true to activate multi-mode sequencing
+    PRESET = 4;          -- 1..5 (see MULTI_MODE_PRESETS below)
+    FIRST_PHASE_MINUTES = 3; -- how long to run the first mode before switching (timer presets)
+    FINISHING_REPS = 5;  -- used by preset 5: number of FINISHING reps before switching
+}
+
+local MULTI_MODE_PRESETS = {
+    [1] = { first = 'DEFENDING', second = 'SHOOTING2' };
+    [2] = { first = 'DEFENDING', second = 'FINISHING' };
+    [3] = { first = 'PLAYMAKING', second = 'FINISHING' };
+    [4] = { first = 'PLAYMAKING', second = 'SHOOTING2' };
+    [5] = { first = 'FINISHING', second = 'SHOOTING2', completions = 5 }; -- FINISHING reps (no timer) then switch
+}
+
+local MULTI_MODE_STATE = {
+    active = false;
+    preset = nil;
+    duration = 0;
+    seqType = nil; -- 'timer' or 'counts'
+    goal = nil;
+    count = 0;
+    lastTick = 0;
+}
+
+-- Account slot picker: set build slots/usernames here for easy access
+local MAIN_ACCOUNT_DATA = {
+    BUILD_SLOT = 2;
+    USER_NAME = `lIIlIlIlIIlIIIll`;
+}
+
+local ALT_ACCOUNT_DATA = {
+    BUILD_SLOT = 1;
+    USER_NAME = `sIimeysI`;
+}
+
+-- Centralized behavior config so you only edit here
+local CONFIG = {
+    -- MODE options: `FINISHING` | `DEFENDING` | `SHOOTING2` (mid/2s) | `SHOOTING3` (3s) | `PLAYMAKING`
+    MODE = `PLAYMAKING`;
+
+    -- TIMING behavior: true for good timing (~0.4s), false to intentionally mistime (early or late)
+    TIMING = true; -- true = green timing, false = mistime
+
+    -- When TIMING=false, choose mistime flavor: `early` (release instantly) or `late` (hold long)
+    MISTIME = `early`;
+
+    -- When TIMING=true, this is the hold duration for a green release (seconds)
+    TIMING_HOLD = 0.4;
+
+    -- Optional: per-mode green hold overrides. If set for a mode, it takes precedence over TIMING_HOLD.
+    TIMING_HOLD_MAP = {
+        -- Example defaults (keep equal to TIMING_HOLD initially). You can tune SHOOTING3 independently if needed.
+        SHOOTING2 = 0.4;
+        SHOOTING3 = 0.4;
+        -- FINISHING/DEFENDING/PLAYMAKING typically don't shoot with meter; left here for completeness
+        FINISHING = 0.4;
+        DEFENDING = 0.4;
+        PLAYMAKING = 0.4;
+    };
+
+    -- When MODE = `SHOOTING3`, stand still at the target spot before shooting (seconds)
+    SHOOTING3_WAIT = 0.8;
+
+    -- HUD / Debug
+    GUI = {
+        SHOW_DETAILS = true; -- show mode + ping under the timer
+    };
+    DEBUG = {
+        sync = false;
+        reach = false;
+        dribble = false;
+        layup = false;
+        reconnect = false; -- debug logs for rejoin logic
+    };
+    -- Distance map per mode; tweak once and forget
+    DISTANCES = {
+        FINISHING = 10;   -- layups/finishing
+        DEFENDING = 10;   -- mirrored to finishing distance
+        SHOOTING2 = 25;   -- 2-point shots
+        SHOOTING3 = 43;   -- 3-point shots ("like 30/35")
+        PLAYMAKING = 25;  -- space for dribble actions
+    };
+    -- Layup gating tunables
+    LAYUP = {
+        RADIUS = 2.6;     -- how close you must be to count as a layup
+        STABLE = 0.15;    -- seconds you must remain in range before shooting
+        TIMEOUT = 5;      -- max seconds to wait per attempt
+    };
+    -- Optional synchronization for PLAYMAKING actions (main dribble + alt reach)
+    SYNC = {
+        ENABLED = true;     -- turn on to try synchronized ankle-breaker timing
+        INTERVAL = 0.1;     -- seconds between beats (0.1s = up to 100ms wait)
+        OFFSET = 0.0;       -- phase offset if you want to shift the beat
+        WINDOW = 0.05;      -- fire when within this many seconds of the beat
+        PING_FACTOR = 0.8;  -- fraction of your ping to add to the window
+        -- Tip: set INTERVAL = 0 to disable gating and fire immediately (no sync)
+    };
+    -- Dribble spam cadence for PLAYMAKING (main account)
+    DRIBBLE_SPAM = {
+        ENABLED = true;
+        RATE = 0.03;        -- seconds between H presses during spam window
+        SPAM_WINDOW = 7.0;  -- seconds to spam
+        BREAK_WINDOW = 4.0; -- seconds to rest
+    };
+    -- Auto-rejoin/watchdog behavior to preempt disconnects
+    RECONNECT = {
+        AUTO_REJOIN = true; -- master switch for all client-side rejoin logic
+        -- If Heartbeat stalls repeatedly (likely hitch/lag spike), proactively rejoin
+        HEARTBEAT_WATCHDOG = {
+            ENABLED = true;
+            STALL_THRESHOLD = 0.9; -- seconds; lower threshold to preempt engine reconnect dialog
+            MAX_STALLS = 2;        -- fewer stalls before rejoin for faster recovery
+        };
+        -- If ping sample stops changing for this long, assume dead connection
+        PING_WATCHDOG = {
+            ENABLED = true;
+            TIMEOUT = 6;   -- more aggressive: rejoin sooner if ping freezes
+            SAMPLE_INTERVAL = 0.5; -- check status twice per second
+        };
+        -- Backoff used when Teleport fails
+        RETRY_BACKOFF = { 2, 4, 8, 16, 30 };
+        -- Error hook behavior
+        ERROR_MENU_FIRST = true; -- true: go Menu-first, false: go Lobby directly
+        ERROR_LOBBY_FALLBACK_DELAY = 2.0; -- if Menu teleport didn’t start by this many seconds, try Lobby
+        ERROR_MAX_ATTEMPTS = 0; -- 0 = retry indefinitely, otherwise stop after N attempts
+        ERROR_BASE_DELAY = 1;   -- base seconds for exponential backoff when retrying menu teleports
+    };
+    SAFETY = {
+        MENU_TIMEOUT_MIN = 7; -- minutes before forcing a menu reset when stuck in a place
+    };
+}
+do
+    MULTI_MODE_STATE.duration = 0
+    MULTI_MODE_STATE.seqType = nil
+    MULTI_MODE_STATE.goal = nil
+    MULTI_MODE_STATE.count = 0
+    MULTI_MODE_STATE.lastTick = 0
+
+    if MULTI_MODE.ENABLED then
+        local preset = MULTI_MODE_PRESETS[MULTI_MODE.PRESET]
+        if preset then
+            CONFIG.MODE = preset.first
+            MULTI_MODE_STATE.active = true
+            MULTI_MODE_STATE.preset = preset
+
+            if preset.completions then
+                MULTI_MODE_STATE.seqType = 'counts'
+                local reps = tonumber(MULTI_MODE.FINISHING_REPS)
+                if not reps or reps <= 0 then
+                    reps = preset.completions
+                end
+                reps = reps or 1
+                MULTI_MODE_STATE.goal = math.max(1, math.floor(reps))
+            else
+                MULTI_MODE_STATE.seqType = 'timer'
+                MULTI_MODE_STATE.duration = math.max(0, (MULTI_MODE.FIRST_PHASE_MINUTES or 0)) * 60
+            end
+        end
+    end
+end
+
+local QUEUE_TIMEOUT = 17
+local QUEUE_DELAY = 3
+
+-- Backwards compat alias (older code paths use this name); now driven by CONFIG.MODE
+local BADGE_TARGET = CONFIG.MODE
+
+local players = game:GetService(`Players`)
+local teleport_service = game:GetService(`TeleportService`)
+local replicated_storage = game:GetService(`ReplicatedStorage`)
+local tween_service = game:GetService(`TweenService`)
+
+repeat task.wait() until players.LocalPlayer
+local local_player = players.LocalPlayer
+
+local account_one
+local account_two
+
+local place_id = game.PlaceId
+local job_id = game.JobId
+
+-- Track how long we've been in this server instance (safety net watchdog uses this)
+local SERVER_JOIN_TIME = tick()
+-- Flag to indicate a safety-net teleport attempt is in progress (so we can handle fallback)
+local SAFETY_NET_ACTIVE = false
+-- Track current server identity to detect actual server transitions (resets safety timer)
+local LAST_PLACE_ID = place_id
+local LAST_JOB_ID = job_id
+local PENDING_TELEPORT = false
+-- When true, defer any auto-rejoin/teleport attempts to avoid interrupting critical actions (like layups)
+local CRITICAL_ACTION = false
+-- Track if an error-prompt driven reconnect is currently active
+local ERROR_TRIGGER_ACTIVE = false
+-- State for repeated error-based reconnect attempts
+local error_rejoin = { running = false, attempt = 0 }
+
+local menu_rejoin_state = { active = false, attempts = 0 }
+
+-- Exposed helpers (assigned later) so other systems can trigger fast/error reconnect flows
+local trigger_fast_rejoin
+local trigger_error_reconnect
+local request_menu_rejoin
+
+-- Gameplay activity tracking to avoid rejoin during active play
+local LAST_ACTIVITY_T = os.clock()
+local SAFE_REJOIN_IDLE_SEC = 2.5 -- seconds without input/game action before we consider it safe to rejoin
+
+local function mark_activity()
+    LAST_ACTIVITY_T = os.clock()
+end
+
+local function recently_active()
+    return (os.clock() - (LAST_ACTIVITY_T or 0)) < SAFE_REJOIN_IDLE_SEC
+end
+
+local function safe_to_rejoin()
+    return (not CRITICAL_ACTION) and (not recently_active())
+end
+
+local character = local_player.Character or local_player.CharacterAdded:Wait()
+local root_part = character:WaitForChild(`HumanoidRootPart`)
+
+local network = game:GetService(`Stats`).Network
+local server_stats = network.ServerStatsItem
+local ping = server_stats[`Data Ping`]
+
+-- Ping helpers and debug logger (defined early so HUD and sync can use them)
+local function get_ping_ms()
+    local success, value = pcall(function()
+        return ping:GetValue()
+    end)
+    return success and (value or 0) or 0
+end
+
+local function debug_log(flag, ...)
+    if CONFIG.DEBUG and CONFIG.DEBUG[flag] then
+        print('[DBG]['..tostring(flag)..']', ...)
+    end
+end
+
+-- Wait for the local player's data/attributes to be initialized (menu/lobby often need this)
+local function wait_for_player_loaded(timeout)
+    local deadline = os.clock() + (timeout or 12)
+    local okLoaded, okData = false, false
+    local player_data = nil
+    -- Try to get PlayerData tree early if present
+    pcall(function()
+        player_data = local_player:FindFirstChild('PlayerData') or local_player:WaitForChild('PlayerData', 8)
+    end)
+    while os.clock() < deadline do
+        -- Attributes path
+        local aLoaded = local_player:GetAttribute('Loaded')
+        local aData = local_player:GetAttribute('LoadedData')
+        okLoaded = (aLoaded == true)
+        okData = (aData == true)
+        -- Fallback: some games set flags inside PlayerData as BoolValues
+        if player_data then
+            local pdLoaded = player_data:FindFirstChild('Loaded')
+            local pdData = player_data:FindFirstChild('LoadedData')
+            if pdLoaded and pdLoaded:IsA('BoolValue') and pdLoaded.Value then okLoaded = true end
+            if pdData and pdData:IsA('BoolValue') and pdData.Value then okData = true end
+        end
+        if okLoaded and okData then return true end
+        task.wait(0.25)
+    end
+    return okLoaded and okData
+end
+
+-- High-precision wait using Heartbeat to avoid task.wait jitter for timing-sensitive holds
+local function precise_wait(seconds)
+    seconds = tonumber(seconds) or 0
+    if seconds <= 0 then return end
+    local rs = game:GetService('RunService')
+    local start = os.clock()
+    while (os.clock() - start) < seconds do
+        rs.Heartbeat:Wait()
+    end
+end
+
+-- Runtime control and live distance overrides
+local RUNNING = true
+local LIVE_DIST = {}
+-- Track ALT shooting per possession to avoid spamming shots every loop
+local alt_shot_done = false
+
+local function get_active_distance(mode)
+    if LIVE_DIST and LIVE_DIST[mode] ~= nil then
+        return LIVE_DIST[mode]
+    end
+    return (CONFIG and CONFIG.DISTANCES and CONFIG.DISTANCES[mode]) or nil
+end
+
+-- Resolve hold time for current mode (falls back to global TIMING_HOLD)
+local function get_mode_hold(mode)
+    mode = mode or (CONFIG and CONFIG.MODE)
+    local map = CONFIG and CONFIG.TIMING_HOLD_MAP
+    if map and mode and map[mode] ~= nil then
+        return map[mode]
+    end
+    return (CONFIG and CONFIG.TIMING_HOLD) or 0.4
+end
+
+-- Resolve role text directly from the executing player's username
+local function get_role_text()
+    if not local_player then return '?' end
+    local name = local_player.Name
+    if name == (MAIN_ACCOUNT_DATA and MAIN_ACCOUNT_DATA.USER_NAME) then
+        return 'MAIN'
+    end
+    if name == (ALT_ACCOUNT_DATA and ALT_ACCOUNT_DATA.USER_NAME) then
+        return 'ALT'
+    end
+    if type(is_main_account) == 'boolean' then
+        return is_main_account and 'MAIN' or 'ALT'
+    end
+    return '?'
+end
+
+-- Simple centered server runtime timer (uses workspace.DistributedGameTime)
+local function ensure_server_timer_gui()
+    local pg = local_player:WaitForChild(`PlayerGui`)
+    local gui = pg:FindFirstChild(`ServerTimerGui`)
+    if gui then return gui end
+
+    gui = Instance.new(`ScreenGui`)
+    gui.Name = `ServerTimerGui`
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.Parent = pg
+
+    local label = Instance.new(`TextLabel`)
+    label.Name = `TimerLabel`
+    label.AnchorPoint = Vector2.new(0.5, 0.5)
+    label.Position = UDim2.new(0.5, 0, 0.5, 0) -- Center of the screen
+    label.Size = UDim2.new(0, 320, 0, 80)
+    label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    label.BackgroundTransparency = 0.35
+    label.BorderSizePixel = 0
+    label.Text = `00:00:00`
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextScaled = true
+    label.Font = Enum.Font.GothamBold
+    label.Parent = gui
+
+    -- Outline for readability
+    local stroke = Instance.new(`UIStroke`)
+    stroke.Thickness = 2
+    stroke.Color = Color3.fromRGB(0, 0, 0)
+    stroke.Parent = label
+
+    if CONFIG.GUI and CONFIG.GUI.SHOW_DETAILS then
+        local info = Instance.new(`TextLabel`)
+        info.Name = `InfoLabel`
+        info.AnchorPoint = Vector2.new(0.5, 0)
+        info.Position = UDim2.new(0.5, 0, 1, 2)
+        info.Size = UDim2.new(1, 0, 0, 22)
+        info.BackgroundTransparency = 1
+        info.Text = ``
+        info.TextColor3 = Color3.fromRGB(230, 230, 230)
+        info.TextScaled = false
+        info.TextSize = 16
+        info.Font = Enum.Font.Gotham
+        info.Parent = label
+    end
+
+    return gui
+end
+
+-- Lightweight status banner in the corner for visibility across menu/lobby/game
+local function set_status(msg)
+    local gui = ensure_server_timer_gui()
+    if not gui then return end
+    local label = gui:FindFirstChild('StatusLabel')
+    if not label then
+        label = Instance.new('TextLabel')
+        label.Name = 'StatusLabel'
+        label.AnchorPoint = Vector2.new(0, 0)
+        label.Position = UDim2.new(0, 8, 0, 8)
+        label.Size = UDim2.new(0, 460, 0, 22)
+        label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        label.BackgroundTransparency = 0.4
+        label.TextColor3 = Color3.fromRGB(235, 235, 255)
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextYAlignment = Enum.TextYAlignment.Center
+        label.TextScaled = false
+        label.TextSize = 16
+        label.Font = Enum.Font.Gotham
+        label.Parent = gui
+        local stroke = Instance.new('UIStroke')
+        stroke.Thickness = 1
+        stroke.Color = Color3.fromRGB(0, 0, 0)
+        stroke.Parent = label
+    end
+    label.Text = tostring(msg or '')
+end
+
+local function start_server_timer()
+    task.spawn(function()
+        while true do
+            local gui = ensure_server_timer_gui()
+            local label = gui and gui:FindFirstChild('TimerLabel')
+            if label then
+                local t = workspace.DistributedGameTime
+                if type(t) ~= 'number' then t = 0 end
+                if t < 0 then t = 0 end
+                local hours = math.floor(t / 3600)
+                local minutes = math.floor(t / 60) % 60
+                local seconds = math.floor(t) % 60
+                label.Text = string.format("%02d:%02d:%02d", hours, minutes, seconds)
+
+                local info = label:FindFirstChild('InfoLabel')
+                if info then
+                    local ms = math.floor(get_ping_ms())
+                    local mode = (CONFIG and CONFIG.MODE) or '?'
+                    local role = get_role_text()
+                    -- Only show Dist for modes where it's actually used (not for layups/defense)
+                    if mode == 'SHOOTING2' or mode == 'SHOOTING3' or mode == 'PLAYMAKING' then
+                        local dist = get_active_distance(mode)
+                        if dist ~= nil then
+                            info.Text = string.format("Role: %s  |  Mode: %s  |  Dist: %s  |  Ping: %d ms", tostring(role), tostring(mode), tostring(dist), ms)
+                        else
+                            info.Text = string.format("Role: %s  |  Mode: %s  |  Ping: %d ms", tostring(role), tostring(mode), ms)
+                        end
+                    else
+                        info.Text = string.format("Role: %s  |  Mode: %s  |  Ping: %d ms", tostring(role), tostring(mode), ms)
+                    end
+                end
+
+                -- Keep the Mode panel's role tag in sync too
+                local pg = local_player:FindFirstChild('PlayerGui')
+                local root = pg and pg:FindFirstChild('ServerTimerGui')
+                local panel = root and root:FindFirstChild('ModePanel')
+                local roleTag = panel and panel:FindFirstChild('RoleTag')
+                if roleTag then
+                    roleTag.Text = 'Role: ' .. get_role_text()
+                end
+
+                -- Auto-layout: if Mode panel is present/visible, move timer near bottom to avoid overlap
+                if panel and panel.Visible ~= false then
+                    if label.AnchorPoint.Y ~= 1 or label.Position.Y.Scale ~= 0.98 then
+                        label.AnchorPoint = Vector2.new(0.5, 1)
+                        label.Position = UDim2.new(0.5, 0, 0.98, 0)
+                        label.Size = UDim2.new(0, 320, 0, 64)
+                    end
+                else
+                    if label.AnchorPoint.Y ~= 0.5 or label.Position.Y.Scale ~= 0.5 then
+                        label.AnchorPoint = Vector2.new(0.5, 0.5)
+                        label.Position = UDim2.new(0.5, 0, 0.5, 0)
+                        label.Size = UDim2.new(0, 320, 0, 80)
+                    end
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+-- Start the timer immediately so it's visible across menu/lobby/game
+start_server_timer()
+
+-- Anti-AFK: keep the client from being idle-kicked (fully automated)
+do
+    if CONFIG and (CONFIG.ANTI_AFK ~= false) then
+        -- Default ON unless explicitly disabled in CONFIG.ANTI_AFK = false
+        pcall(function()
+            local vu = game:GetService('VirtualUser')
+            players.LocalPlayer.Idled:Connect(function()
+                local cam = workspace.CurrentCamera
+                local cf = cam and cam.CFrame or CFrame.new()
+                vu:Button2Down(Vector2.new(0, 0), cf)
+                task.wait(1)
+                vu:Button2Up(Vector2.new(0, 0), cf)
+            end)
+        end)
+    end
+end
+
+local function join_lobby()
+    -- Be robust: always include local_player and wrap in pcall
+    mark_activity()
+    set_status('Joining lobby…')
+    pcall(function()
+        teleport_service:Teleport(18517963950, local_player)
+    end)
+end
+
+-- Auto rejoin via GuiService error hook: route disconnect prompts straight to the Main Menu with retries
+do
+    local gs = game:GetService('GuiService')
+    local menu_place_id = 18474291382 -- main menu / build select
+    local MAX_ATTEMPTS = tonumber(CONFIG.RECONNECT and CONFIG.RECONNECT.ERROR_MAX_ATTEMPTS) or 0
+    local BASE_DELAY = tonumber(CONFIG.RECONNECT and CONFIG.RECONNECT.ERROR_BASE_DELAY) or 1
+
+    local function attempt_menu_rejoin(reason, message)
+        if menu_rejoin_state.active then return end
+        if PENDING_TELEPORT then return end
+        if not (CONFIG.RECONNECT and CONFIG.RECONNECT.AUTO_REJOIN) then return end
+
+        ERROR_TRIGGER_ACTIVE = true
+        menu_rejoin_state.active = true
+        menu_rejoin_state.attempts = 0
+
+        task.spawn(function()
+            local teleport_requested = false
+            local attempt_limit = (MAX_ATTEMPTS and MAX_ATTEMPTS > 0) and MAX_ATTEMPTS or nil
+            while (not attempt_limit) or (menu_rejoin_state.attempts < attempt_limit) do
+                if PENDING_TELEPORT then break end
+                menu_rejoin_state.attempts += 1
+                local attempt = menu_rejoin_state.attempts
+                local denomLabel = attempt_limit and tostring(attempt_limit) or '∞'
+
+                task.wait(0.5)
+                local lp = players.LocalPlayer
+                if not lp then break end
+
+                set_status(string.format('Auto rejoin → Menu (%d/%s)…', attempt, denomLabel))
+                local ok, err = pcall(function()
+                    teleport_service:Teleport(menu_place_id, lp)
+                end)
+                if ok then
+                    debug_log('reconnect', 'Menu teleport requested (attempt '..attempt..')', reason, message)
+                    teleport_requested = true
+                    break
+                else
+                    debug_log('reconnect', 'Menu teleport attempt '..attempt..' failed:', tostring(err))
+                    local delay = BASE_DELAY * (2 ^ (attempt - 1))
+                    if delay > 60 then delay = 60 end
+                    task.wait(delay)
+                end
+            end
+
+            menu_rejoin_state.active = false
+            if teleport_requested then
+                set_status('Auto rejoin → Menu requested…')
+            elseif not PENDING_TELEPORT then
+                if attempt_limit and menu_rejoin_state.attempts >= attempt_limit then
+                    set_status('Auto rejoin → Menu failed: max attempts reached')
+                    ERROR_TRIGGER_ACTIVE = false
+                else
+                    set_status('Auto rejoin → Menu waiting…')
+                end
+            end
+        end)
+    end
+
+    request_menu_rejoin = function(reason)
+        attempt_menu_rejoin(reason or 'manual', nil)
+    end
+
+    if gs and gs.ErrorMessageChanged then
+        gs.ErrorMessageChanged:Connect(function()
+            local msg = ''
+            pcall(function()
+                if gs.GetErrorMessage then
+                    msg = gs:GetErrorMessage() or ''
+                end
+            end)
+            if msg ~= '' then
+                debug_log('reconnect', 'GuiService error prompt:', msg)
+                attempt_menu_rejoin('GuiService', msg)
+            end
+        end)
+    end
+end
+
+-- Toggle the timer GUI with a hotkey (U)
+do
+    local uis = game:GetService('UserInputService')
+    uis.InputBegan:Connect(function(input, gp)
+        if not gp then mark_activity() end
+        if gp then return end
+        if input.KeyCode == Enum.KeyCode.U then
+            local pg = local_player:FindFirstChild('PlayerGui')
+            if not pg then return end
+            local gui = pg:FindFirstChild('ServerTimerGui') or ensure_server_timer_gui()
+            if gui then gui.Enabled = not gui.Enabled end
+        elseif input.KeyCode == Enum.KeyCode.F5 then
+            -- Manual reconnect hotkey: F5 triggers a same-instance rejoin when possible
+            local ts = teleport_service
+            local ok, err = pcall(function()
+                if game.JobId and #tostring(game.JobId) > 0 then
+                    ts:TeleportToPlaceInstance(game.PlaceId, game.JobId, local_player)
+                else
+                    ts:Teleport(game.PlaceId, local_player)
+                end
+            end)
+            -- Toast feedback if the Mode panel is visible
+            local pg = local_player:FindFirstChild('PlayerGui')
+            local root = pg and pg:FindFirstChild('ServerTimerGui')
+            local panel = root and root:FindFirstChild('ModePanel')
+            local toast = panel and panel:FindFirstChild('Toast')
+            if toast then
+                toast.Text = ok and 'Reconnecting…' or ('Reconnect failed: '..tostring(err))
+                task.delay(1.5, function()
+                    if toast then toast.Text = '' end
+                end)
+            end
+        end
+    end)
+end
+
+-- Lightweight auto-rejoin/watchdog system
+do
+    local rs = game:GetService('RunService')
+    local ts = teleport_service
+    local backoffs = (CONFIG.RECONNECT and CONFIG.RECONNECT.RETRY_BACKOFF) or {2,4,8,16}
+    local rejoin_state = { inProgress = false, started = false }
+
+    -- Best-effort fast rejoin (same place). Uses Roblox matchmaking to pick an instance.
+    local function fast_rejoin(reason)
+        if not (CONFIG.RECONNECT and CONFIG.RECONNECT.AUTO_REJOIN) then return end
+        if rejoin_state.inProgress then return end
+        if not safe_to_rejoin() then
+            debug_log('reconnect', 'Fast rejoin deferred (not safe):', tostring(reason))
+            -- Retry shortly after the activity window
+            task.delay(3, function()
+                if not rejoin_state.inProgress then
+                    fast_rejoin((tostring(reason) or 'unknown')..':deferred')
+                end
+            end)
+            return
+        end
+        rejoin_state.inProgress = true
+        debug_log('reconnect', 'Fast rejoin start:', tostring(reason))
+
+        local attempt = 0
+        local function try_once()
+            attempt += 1
+            local ok, err = pcall(function()
+                -- Prefer reconnecting to the same instance if possible (mirrors the Reconnect button)
+                if job_id and #tostring(job_id) > 0 and attempt <= 2 then
+                    ts:TeleportToPlaceInstance(place_id, job_id, local_player)
+                else
+                    ts:Teleport(place_id, local_player) -- let Roblox pick an available server
+                end
+            end)
+            if not ok then
+                debug_log('reconnect', 'Teleport error:', tostring(err))
+                local delay = backoffs[math.min(attempt, #backoffs)] or 10
+                task.delay(delay, try_once)
+            end
+        end
+
+        try_once()
+    end
+    trigger_fast_rejoin = fast_rejoin
+
+    -- Mark in-progress when a teleport begins (prevents duplicate rejoin attempts)
+    pcall(function()
+        if players.LocalPlayer and players.LocalPlayer.OnTeleport then
+            players.LocalPlayer.OnTeleport:Connect(function(state)
+                if state == Enum.TeleportState.InProgress then
+                    rejoin_state.inProgress = true
+                    -- Clear safety flag once a teleport actually starts
+                    SAFETY_NET_ACTIVE = false
+                    -- Mark that a teleport is underway so we expect a place/job change soon
+                    PENDING_TELEPORT = true
+                end
+            end)
+        end
+    end)
+
+    -- Retry if a teleport initialization fails (e.g., server full)
+    pcall(function()
+        ts.TeleportInitFailed:Connect(function(player, result, errMsg)
+            if player ~= local_player then return end
+            debug_log('reconnect', 'Teleport failed:', tostring(result), tostring(errMsg))
+            -- Allow another attempt shortly
+            rejoin_state.inProgress = false
+
+            -- If the safety net was attempting a menu teleport, fallback to the lobby instead of generic rejoin
+            if SAFETY_NET_ACTIVE then
+                SAFETY_NET_ACTIVE = false
+                pcall(function()
+                    teleport_service:Teleport(18517963950, local_player) -- matchmaking lobby fallback
+                end)
+                return
+            end
+
+            -- If an error-driven reconnect is active, keep hammering Menu/Lobby using the error loop
+            if ERROR_TRIGGER_ACTIVE then
+                task.delay(1.0, function()
+                    if request_menu_rejoin then
+                        request_menu_rejoin('TeleportInitFailed:'..tostring(result))
+                    else
+                        error_reconnect_loop()
+                    end
+                end)
+            else
+                task.delay(1.0, function()
+                    fast_rejoin('TeleportInitFailed:'..tostring(result))
+                end)
+            end
+        end)
+    end)
+
+    local function start_reconnect_watchdogs()
+        if rejoin_state.started then return end
+        rejoin_state.started = true
+
+        -- Heartbeat stall watchdog
+        task.spawn(function()
+            if not (CONFIG.RECONNECT and CONFIG.RECONNECT.HEARTBEAT_WATCHDOG and CONFIG.RECONNECT.HEARTBEAT_WATCHDOG.ENABLED) then return end
+            local stalls = 0
+            local last = os.clock()
+            local thresh = CONFIG.RECONNECT.HEARTBEAT_WATCHDOG.STALL_THRESHOLD or 1.5
+            local maxStalls = CONFIG.RECONNECT.HEARTBEAT_WATCHDOG.MAX_STALLS or 4
+            rs.Heartbeat:Connect(function()
+                local now = os.clock()
+                local dt = now - last
+                last = now
+                if dt > thresh then
+                    -- If player is active or in a critical section, do not count this stall toward rejoin
+                    if not safe_to_rejoin() then
+                        stalls = 0
+                        return
+                    end
+                    stalls += 1
+                    debug_log('reconnect', string.format('Heartbeat stall: %.2fs (%d/%d)', dt, stalls, maxStalls))
+                    if stalls >= maxStalls then
+                        fast_rejoin('Heartbeat stalls')
+                        stalls = 0
+                    end
+                else
+                    stalls = 0
+                end
+            end)
+        end)
+
+        -- Ping-change watchdog
+        task.spawn(function()
+            if not (CONFIG.RECONNECT and CONFIG.RECONNECT.PING_WATCHDOG and CONFIG.RECONNECT.PING_WATCHDOG.ENABLED) then return end
+            local timeout = CONFIG.RECONNECT.PING_WATCHDOG.TIMEOUT or 12
+            local interval = CONFIG.RECONNECT.PING_WATCHDOG.SAMPLE_INTERVAL or 1
+            local lastPing = nil
+            local lastChange = os.clock()
+            while task.wait(interval) do
+                local ok, val = pcall(function()
+                    return ping:GetValue()
+                end)
+                if not ok then
+                    -- If Stats access failed consistently, prefer to retry joining
+                    if (os.clock() - lastChange) > timeout then
+                        if safe_to_rejoin() then
+                            fast_rejoin('Ping read failure')
+                        else
+                            -- treat as activity; reset timer to avoid firing mid-action
+                            lastChange = os.clock()
+                        end
+                    end
+                else
+                    if lastPing == nil or val ~= lastPing then
+                        lastPing = val
+                        lastChange = os.clock()
+                    else
+                        if (os.clock() - lastChange) > timeout then
+                            debug_log('reconnect', 'Ping stuck for >', timeout, 's (val=', tostring(val), ')')
+                            if safe_to_rejoin() then
+                                fast_rejoin('Ping stuck')
+                            else
+                                -- push the window forward until safe
+                                lastChange = os.clock()
+                            end
+                            lastChange = os.clock() -- avoid repeated triggers
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- Start the watchdogs early
+    start_reconnect_watchdogs()
+
+    -- Robust error-based reconnect loop: alternate Menu/Lobby with backoffs until a teleport starts
+    local function error_reconnect_loop()
+        if error_rejoin.running then return end
+        error_rejoin.running = true
+        error_rejoin.attempt = 0
+        local originPlace = game.PlaceId
+        local backoffs = (CONFIG.RECONNECT and CONFIG.RECONNECT.RETRY_BACKOFF) or {2,4,8,16,30}
+        local menuFirst = (CONFIG.RECONNECT and CONFIG.RECONNECT.ERROR_MENU_FIRST ~= false)
+        local fbDelay = (CONFIG.RECONNECT and CONFIG.RECONNECT.ERROR_LOBBY_FALLBACK_DELAY) or 2.0
+
+        local function attempt_once()
+            if PENDING_TELEPORT then return end
+            if game.PlaceId ~= originPlace then error_rejoin.running = false; return end
+            error_rejoin.attempt += 1
+            local tryMenu = menuFirst
+            if error_rejoin.attempt % 2 == 0 then
+                -- Alternate destinations on each attempt for stubborn failures
+                tryMenu = not menuFirst
+            end
+            if tryMenu then
+                set_status('Reconnect: attempt '..tostring(error_rejoin.attempt)..' → Menu…')
+                pcall(function()
+                    teleport_service:Teleport(18474291382, local_player)
+                end)
+                -- Fallback to Lobby if teleport didn't start
+                task.delay(fbDelay, function()
+                    if error_rejoin.running and (not PENDING_TELEPORT) and game.PlaceId == originPlace then
+                        set_status('Reconnect: fallback → Lobby…')
+                        pcall(function()
+                            teleport_service:Teleport(18517963950, local_player)
+                        end)
+                    end
+                end)
+            else
+                set_status('Reconnect: attempt '..tostring(error_rejoin.attempt)..' → Lobby…')
+                pcall(function()
+                    teleport_service:Teleport(18517963950, local_player)
+                end)
+                task.delay(fbDelay, function()
+                    if error_rejoin.running and (not PENDING_TELEPORT) and game.PlaceId == originPlace then
+                        set_status('Reconnect: fallback → Menu…')
+                        pcall(function()
+                            teleport_service:Teleport(18474291382, local_player)
+                        end)
+                    end
+                end)
+            end
+
+            local delay = backoffs[math.min(error_rejoin.attempt, #backoffs)] or 10
+            task.delay(delay, function()
+                if error_rejoin.running and (not PENDING_TELEPORT) and game.PlaceId == originPlace then
+                    attempt_once()
+                end
+            end)
+        end
+
+        attempt_once()
+    end
+    trigger_error_reconnect = function()
+        ERROR_TRIGGER_ACTIVE = true
+        error_reconnect_loop()
+    end
+end
+
+-- Reset the safety timer when we actually land in a different server instance
+task.spawn(function()
+    while task.wait(1) do
+        local curPlace = game.PlaceId
+        local curJob = game.JobId
+        if curPlace ~= LAST_PLACE_ID or curJob ~= LAST_JOB_ID then
+            LAST_PLACE_ID = curPlace
+            LAST_JOB_ID = curJob
+            SERVER_JOIN_TIME = tick()
+            PENDING_TELEPORT = false
+            ERROR_TRIGGER_ACTIVE = false
+            error_rejoin.running = false
+            menu_rejoin_state.active = false
+            menu_rejoin_state.attempts = 0
+        end
+    end
+end)
+
+-- Safety watchdog: if we're stuck in the same place too long, force a Menu reset then resume normally.
+task.spawn(function()
+    local minutes = (CONFIG and CONFIG.SAFETY and CONFIG.SAFETY.MENU_TIMEOUT_MIN) or 7
+    local LIMIT = math.max(1, minutes) * 60 -- seconds
+    while task.wait(5) do
+        local elapsed = tick() - SERVER_JOIN_TIME
+        if elapsed >= LIMIT then
+            safety_net_teleport()
+            break
+        end
+    end
+end)
+
+-- Simple interactive Mode selector GUI (dropdown + confirm)
+local MODES = { 'FINISHING', 'DEFENDING', 'SHOOTING2', 'SHOOTING3', 'PLAYMAKING' }
+local selectedMode = CONFIG.MODE
+local selectedDistance = (get_active_distance(selectedMode)) or ((CONFIG and CONFIG.DISTANCES and CONFIG.DISTANCES[selectedMode]) or 25)
+local selectedHold = get_mode_hold(selectedMode)
+
+-- Distance options (scrollable dropdown). Added more granularity in the 40s.
+local DIST_VALUES = { 2, 8, 10, 15, 20, 25, 30, 35, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50 }
+
+local TIMING_VALUES = {}
+do
+    -- 0.00 to 0.80 (inclusive) stepping by 0.05
+    local v = 0.0
+    while v <= 0.8001 do
+        table.insert(TIMING_VALUES, tonumber(string.format('%.2f', v)))
+        v = v + 0.05
+    end
+end
+
+local function ensure_mode_gui()
+    local pg = local_player:WaitForChild('PlayerGui')
+    local root = pg:FindFirstChild('ServerTimerGui') or ensure_server_timer_gui()
+    if not root then return nil end
+
+    local panel = root:FindFirstChild('ModePanel')
+    if panel then return panel end
+
+    panel = Instance.new('Frame')
+    panel.Name = 'ModePanel'
+    panel.AnchorPoint = Vector2.new(0.5, 0)
+    panel.Position = UDim2.new(0.5, 0, 0.12, 0)
+    panel.Size = UDim2.new(0, 300, 0, 250)
+    panel.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    panel.BackgroundTransparency = 0.15
+    panel.Parent = root
+
+    local corner = Instance.new('UICorner')
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = panel
+
+    local stroke = Instance.new('UIStroke')
+    stroke.Thickness = 2
+    stroke.Color = Color3.fromRGB(0, 0, 0)
+    stroke.Transparency = 0.2
+    stroke.Parent = panel
+
+    local title = Instance.new('TextLabel')
+    title.Name = 'Title'
+    title.AnchorPoint = Vector2.new(0.5, 0)
+    title.Position = UDim2.new(0.5, 0, 0, 8)
+    title.Size = UDim2.new(1, -16, 0, 22)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamMedium
+    title.Text = 'Mode Selector'
+    title.TextScaled = false
+    title.TextSize = 18
+    title.TextColor3 = Color3.fromRGB(230, 230, 240)
+    title.Parent = panel
+
+    local roleTag = Instance.new('TextLabel')
+    roleTag.Name = 'RoleTag'
+    roleTag.AnchorPoint = Vector2.new(0.5, 0)
+    roleTag.Position = UDim2.new(0.5, 0, 0, 26)
+    roleTag.Size = UDim2.new(1, -16, 0, 16)
+    roleTag.BackgroundTransparency = 1
+    roleTag.Font = Enum.Font.Gotham
+    roleTag.TextSize = 14
+    roleTag.TextColor3 = Color3.fromRGB(180, 200, 220)
+    roleTag.Text = (is_main_account and 'Role: MAIN') or ((is_main_account == false) and 'Role: ALT') or 'Role: ?'
+    roleTag.Parent = panel
+
+    -- Mode dropdown
+    local dropdownBtn = Instance.new('TextButton')
+    dropdownBtn.Name = 'DropdownBtn'
+    dropdownBtn.AnchorPoint = Vector2.new(0.5, 0)
+    dropdownBtn.Position = UDim2.new(0.5, 0, 0, 46)
+    dropdownBtn.Size = UDim2.new(1, -24, 0, 30)
+    dropdownBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    dropdownBtn.AutoButtonColor = true
+    dropdownBtn.TextColor3 = Color3.fromRGB(240, 240, 255)
+    dropdownBtn.TextSize = 16
+    dropdownBtn.Font = Enum.Font.Gotham
+    dropdownBtn.Text = tostring(selectedMode) .. '  ▾'
+    dropdownBtn.Parent = panel
+    local ddCorner = Instance.new('UICorner'); ddCorner.CornerRadius = UDim.new(0, 6); ddCorner.Parent = dropdownBtn
+
+    local optsFrame = Instance.new('Frame')
+    optsFrame.Name = 'Options'
+    optsFrame.AnchorPoint = Vector2.new(0.5, 0)
+    optsFrame.Position = UDim2.new(0.5, 0, 0, 110)
+    optsFrame.Size = UDim2.new(1, -24, 0, 0)
+    optsFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    optsFrame.Visible = false
+    optsFrame.ClipsDescendants = true
+    optsFrame.ZIndex = 50
+    optsFrame.Parent = panel
+    local ofCorner = Instance.new('UICorner'); ofCorner.CornerRadius = UDim.new(0, 6); ofCorner.Parent = optsFrame
+
+    local list = Instance.new('UIListLayout')
+    list.Padding = UDim.new(0, 4)
+    list.FillDirection = Enum.FillDirection.Vertical
+    list.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    list.SortOrder = Enum.SortOrder.LayoutOrder
+    list.Parent = optsFrame
+
+    local function rebuildOptions()
+        for _, child in ipairs(optsFrame:GetChildren()) do
+            if child:IsA('TextButton') then child:Destroy() end
+        end
+        for i, name in ipairs(MODES) do
+            local btn = Instance.new('TextButton')
+            btn.Name = 'Opt_'..name
+            btn.Size = UDim2.new(1, -8, 0, 26)
+            btn.BackgroundColor3 = Color3.fromRGB(45, 45, 65)
+            btn.TextColor3 = Color3.fromRGB(235, 235, 255)
+            btn.TextSize = 15
+            btn.Font = Enum.Font.Gotham
+            btn.Text = name
+            btn.Parent = optsFrame
+            btn.ZIndex = 51
+            local bCorner = Instance.new('UICorner'); bCorner.CornerRadius = UDim.new(0, 4); bCorner.Parent = btn
+            btn.MouseButton1Click:Connect(function()
+                selectedMode = name
+                dropdownBtn.Text = tostring(selectedMode) .. '  ▾'
+                -- When mode changes (selection only), update the distance dropdown label to the current value for that mode
+                local currentForMode = get_active_distance(selectedMode) or (CONFIG.DISTANCES and CONFIG.DISTANCES[selectedMode]) or selectedDistance
+                selectedDistance = currentForMode
+                local distBtn = panel:FindFirstChild('DistDropdown')
+                local distOptsFrame = panel:FindFirstChild('DistOptions')
+                if selectedMode == 'FINISHING' or selectedMode == 'DEFENDING' then
+                    if distBtn then distBtn.Visible = false end
+                    if distOptsFrame then distOptsFrame.Visible = false end
+                else
+                    if distBtn and distBtn:IsA('TextButton') then
+                        distBtn.Visible = true
+                        distBtn.Text = ('Dist: %s  ▾'):format(tostring(selectedDistance))
+                    end
+                end
+                -- Update the Timer dropdown label to reflect the hold for this mode
+                selectedHold = get_mode_hold(selectedMode)
+                local timingDropBtn = panel:FindFirstChild('TimingDropdown')
+                if timingDropBtn and timingDropBtn:IsA('TextButton') then
+                    timingDropBtn.Text = ('Timer: %.2fs  ▾'):format(tonumber(selectedHold))
+                end
+                optsFrame.Visible = false
+            end)
+        end
+        optsFrame.Size = UDim2.new(1, -24, 0, (#MODES * 26) + ((#MODES - 1) * 4) + 8)
+    end
+
+    rebuildOptions()
+
+    dropdownBtn.MouseButton1Click:Connect(function()
+        local toShow = not optsFrame.Visible
+        optsFrame.Visible = toShow
+        if toShow then
+            -- Restore the computed height when showing again
+            optsFrame.Size = UDim2.new(1, -24, 0, (#MODES * 26) + ((#MODES - 1) * 4) + 8)
+        end
+    end)
+
+    -- Timing toggle (live)
+    local timingBtn = Instance.new('TextButton')
+    timingBtn.Name = 'TimingToggle'
+    timingBtn.AnchorPoint = Vector2.new(0.5, 0)
+    timingBtn.Position = UDim2.new(0.5, 0, 0, 80)
+    timingBtn.Size = UDim2.new(1, -24, 0, 26)
+    timingBtn.BackgroundColor3 = (CONFIG.TIMING and Color3.fromRGB(65, 120, 85)) or Color3.fromRGB(160, 55, 55)
+    timingBtn.AutoButtonColor = true
+    timingBtn.TextColor3 = Color3.fromRGB(240, 240, 255)
+    timingBtn.TextSize = 15
+    timingBtn.Font = Enum.Font.Gotham
+    timingBtn.Text = (CONFIG.TIMING and 'Timing: Green (ON)') or 'Timing: Mistime (OFF)'
+    timingBtn.Parent = panel
+    local tCorner = Instance.new('UICorner'); tCorner.CornerRadius = UDim.new(0, 6); tCorner.Parent = timingBtn
+
+    local function applyTimingVisuals()
+        if timingBtn then
+            timingBtn.Text = (CONFIG.TIMING and 'Timing: Green (ON)') or 'Timing: Mistime (OFF)'
+            timingBtn.BackgroundColor3 = CONFIG.TIMING and Color3.fromRGB(65, 120, 85) or Color3.fromRGB(160, 55, 55)
+        end
+    end
+
+    timingBtn.MouseButton1Click:Connect(function()
+        CONFIG.TIMING = not CONFIG.TIMING
+        applyTimingVisuals()
+        local toast = panel:FindFirstChild('Toast')
+        if toast then
+            toast.Text = CONFIG.TIMING and 'Timing: Green' or 'Timing: Mistime'
+            task.delay(1.0, function()
+                if toast then toast.Text = '' end
+            end)
+        end
+    end)
+    -- Ensure visuals reflect initial state
+    applyTimingVisuals()
+
+    -- Timing Timer dropdown (live)
+    local timingDrop = Instance.new('TextButton')
+    timingDrop.Name = 'TimingDropdown'
+    timingDrop.AnchorPoint = Vector2.new(0.5, 0)
+    timingDrop.Position = UDim2.new(0.5, 0, 0, 112)
+    timingDrop.Size = UDim2.new(1, -24, 0, 30)
+    timingDrop.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    timingDrop.AutoButtonColor = true
+    timingDrop.TextColor3 = Color3.fromRGB(240, 240, 255)
+    timingDrop.TextSize = 16
+    timingDrop.Font = Enum.Font.Gotham
+    timingDrop.Text = ('Timer: %.2fs  ▾'):format(tonumber(selectedHold))
+    timingDrop.Parent = panel
+    local tdCorner = Instance.new('UICorner'); tdCorner.CornerRadius = UDim.new(0, 6); tdCorner.Parent = timingDrop
+
+    local timingOpts = Instance.new('Frame')
+    timingOpts.Name = 'TimingOptions'
+    timingOpts.AnchorPoint = Vector2.new(0.5, 0)
+    timingOpts.Position = UDim2.new(0.5, 0, 0, 142)
+    timingOpts.Size = UDim2.new(1, -24, 0, 0)
+    timingOpts.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    timingOpts.Visible = false
+    timingOpts.ClipsDescendants = true
+    timingOpts.ZIndex = 50
+    timingOpts.Parent = panel
+    local toCorner = Instance.new('UICorner'); toCorner.CornerRadius = UDim.new(0, 6); toCorner.Parent = timingOpts
+
+    local tlist = Instance.new('UIListLayout')
+    tlist.Padding = UDim.new(0, 4)
+    tlist.FillDirection = Enum.FillDirection.Vertical
+    tlist.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    tlist.SortOrder = Enum.SortOrder.LayoutOrder
+    tlist.Parent = timingOpts
+
+    local function rebuildTimingOptions()
+        for _, child in ipairs(timingOpts:GetChildren()) do
+            if child:IsA('TextButton') then child:Destroy() end
+        end
+        for _, val in ipairs(TIMING_VALUES) do
+            local btn = Instance.new('TextButton')
+            btn.Name = 'OptHold_'..tostring(val)
+            btn.Size = UDim2.new(1, -8, 0, 26)
+            btn.BackgroundColor3 = Color3.fromRGB(45, 45, 65)
+            btn.TextColor3 = Color3.fromRGB(235, 235, 255)
+            btn.TextSize = 15
+            btn.Font = Enum.Font.Gotham
+            btn.Text = string.format('%.2f', val)
+            btn.Parent = timingOpts
+            btn.ZIndex = 51
+            local bCorner = Instance.new('UICorner'); bCorner.CornerRadius = UDim.new(0, 4); bCorner.Parent = btn
+            btn.MouseButton1Click:Connect(function()
+                selectedHold = tonumber(val)
+                -- Live-apply per-mode: store in TIMING_HOLD_MAP and also update global for backward-compat
+                CONFIG.TIMING_HOLD = selectedHold
+                CONFIG.TIMING_HOLD_MAP = CONFIG.TIMING_HOLD_MAP or {}
+                CONFIG.TIMING_HOLD_MAP[selectedMode] = selectedHold
+                timingDrop.Text = ('Timer: %.2fs  ▾'):format(tonumber(selectedHold))
+                timingOpts.Visible = false
+                local toast = panel:FindFirstChild('Toast')
+                if toast then
+                    toast.Text = string.format('%s hold set: %.2fs', tostring(selectedMode), selectedHold)
+                    task.delay(1.0, function()
+                        if toast then toast.Text = '' end
+                    end)
+                end
+            end)
+        end
+        timingOpts.Size = UDim2.new(1, -24, 0, (#TIMING_VALUES * 26) + ((#TIMING_VALUES - 1) * 4) + 8)
+    end
+
+    rebuildTimingOptions()
+
+    timingDrop.MouseButton1Click:Connect(function()
+        local toShow = not timingOpts.Visible
+        timingOpts.Visible = toShow
+        if toShow then
+            -- Restore computed height when reopening
+            timingOpts.Size = UDim2.new(1, -24, 0, (#TIMING_VALUES * 26) + ((#TIMING_VALUES - 1) * 4) + 8)
+        end
+    end)
+
+    -- Distance dropdown
+    local distDropdown = Instance.new('TextButton')
+    distDropdown.Name = 'DistDropdown'
+    distDropdown.AnchorPoint = Vector2.new(0.5, 0)
+    distDropdown.Position = UDim2.new(0.5, 0, 0, 174)
+    distDropdown.Size = UDim2.new(1, -24, 0, 30)
+    distDropdown.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    distDropdown.AutoButtonColor = true
+    distDropdown.TextColor3 = Color3.fromRGB(240, 240, 255)
+    distDropdown.TextSize = 16
+    distDropdown.Font = Enum.Font.Gotham
+    distDropdown.Text = ('Dist: %s  ▾'):format(tostring(selectedDistance))
+    distDropdown.Parent = panel
+    local ddCorner2 = Instance.new('UICorner'); ddCorner2.CornerRadius = UDim.new(0, 6); ddCorner2.Parent = distDropdown
+
+    local distOpts = Instance.new('ScrollingFrame')
+    distOpts.Name = 'DistOptions'
+    distOpts.AnchorPoint = Vector2.new(0.5, 0)
+    distOpts.Position = UDim2.new(0.5, 0, 0, 204)
+    -- Fixed visible height with vertical scrolling; content auto-sizes canvas
+    distOpts.Size = UDim2.new(1, -24, 0, 120)
+    distOpts.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    distOpts.Visible = false
+    distOpts.ClipsDescendants = true
+    distOpts.ZIndex = 50
+    distOpts.Parent = panel
+    distOpts.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    distOpts.CanvasSize = UDim2.new(0, 0, 0, 0)
+    distOpts.ScrollingDirection = Enum.ScrollingDirection.Y
+    distOpts.ScrollBarThickness = 6
+    distOpts.Active = true
+    local doCorner = Instance.new('UICorner'); doCorner.CornerRadius = UDim.new(0, 6); doCorner.Parent = distOpts
+
+    local dlist = Instance.new('UIListLayout')
+    dlist.Padding = UDim.new(0, 4)
+    dlist.FillDirection = Enum.FillDirection.Vertical
+    dlist.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    dlist.SortOrder = Enum.SortOrder.LayoutOrder
+    dlist.Parent = distOpts
+
+    local function rebuildDistOptions()
+        for _, child in ipairs(distOpts:GetChildren()) do
+            if child:IsA('TextButton') then child:Destroy() end
+        end
+        for _, val in ipairs(DIST_VALUES) do
+            local btn = Instance.new('TextButton')
+            btn.Name = 'OptDist_'..tostring(val)
+            btn.Size = UDim2.new(1, -8, 0, 26)
+            btn.BackgroundColor3 = Color3.fromRGB(45, 45, 65)
+            btn.TextColor3 = Color3.fromRGB(235, 235, 255)
+            btn.TextSize = 15
+            btn.Font = Enum.Font.Gotham
+            btn.Text = tostring(val)
+            btn.Parent = distOpts
+            btn.ZIndex = 51
+            local bCorner = Instance.new('UICorner'); bCorner.CornerRadius = UDim.new(0, 4); bCorner.Parent = btn
+            btn.MouseButton1Click:Connect(function()
+                selectedDistance = tonumber(val)
+                distDropdown.Text = ('Dist: %s  ▾'):format(tostring(selectedDistance))
+                -- Live apply: update the active override for the SELECTED mode immediately
+                LIVE_DIST[selectedMode] = selectedDistance
+                distOpts.Visible = false
+            end)
+        end
+    end
+
+    rebuildDistOptions()
+
+    distDropdown.MouseButton1Click:Connect(function()
+        distOpts.Visible = not distOpts.Visible
+    end)
+
+    -- Hide distance controls initially for layup/defense modes
+    if selectedMode == 'FINISHING' or selectedMode == 'DEFENDING' then
+        distDropdown.Visible = false
+        distOpts.Visible = false
+    end
+
+    -- Buttons row (Confirm + Stop)
+    local btnRow = Instance.new('Frame')
+    btnRow.Name = 'Buttons'
+    btnRow.AnchorPoint = Vector2.new(0.5, 1)
+    btnRow.Position = UDim2.new(0.5, 0, 1, -8)
+    btnRow.Size = UDim2.new(1, -24, 0, 30)
+    btnRow.BackgroundTransparency = 1
+    btnRow.Parent = panel
+
+    local confirm = Instance.new('TextButton')
+    confirm.Name = 'ConfirmBtn'
+    confirm.AnchorPoint = Vector2.new(0, 0.5)
+    confirm.Position = UDim2.new(0, 0, 0.5, 0)
+    confirm.Size = UDim2.new(0.58, -4, 1, 0)
+    confirm.BackgroundColor3 = Color3.fromRGB(65, 120, 85)
+    confirm.TextColor3 = Color3.fromRGB(255, 255, 255)
+    confirm.TextSize = 16
+    confirm.Font = Enum.Font.GothamMedium
+    confirm.Text = 'Confirm'
+    confirm.Parent = btnRow
+    local cCorner = Instance.new('UICorner'); cCorner.CornerRadius = UDim.new(0, 6); cCorner.Parent = confirm
+
+    local stopBtn = Instance.new('TextButton')
+    stopBtn.Name = 'StopBtn'
+    stopBtn.AnchorPoint = Vector2.new(1, 0.5)
+    stopBtn.Position = UDim2.new(1, 0, 0.5, 0)
+    stopBtn.Size = UDim2.new(0.42, 0, 1, 0)
+    stopBtn.BackgroundColor3 = RUNNING and Color3.fromRGB(160, 55, 55) or Color3.fromRGB(65, 120, 85)
+    stopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    stopBtn.TextSize = 16
+    stopBtn.Font = Enum.Font.GothamMedium
+    stopBtn.Text = RUNNING and 'Stop' or 'Start'
+    stopBtn.Parent = btnRow
+    local sCorner = Instance.new('UICorner'); sCorner.CornerRadius = UDim.new(0, 6); sCorner.Parent = stopBtn
+
+    local toast = Instance.new('TextLabel')
+    toast.Name = 'Toast'
+    toast.AnchorPoint = Vector2.new(0.5, 0)
+    toast.Position = UDim2.new(0.5, 0, 1, 2)
+    toast.Size = UDim2.new(1, -16, 0, 18)
+    toast.BackgroundTransparency = 1
+    toast.Font = Enum.Font.Gotham
+    toast.Text = ''
+    toast.TextSize = 14
+    toast.TextColor3 = Color3.fromRGB(200, 255, 200)
+    toast.Parent = panel
+
+    confirm.MouseButton1Click:Connect(function()
+        -- Apply both mode and (if applicable) distance
+        CONFIG.MODE = selectedMode
+        dropdownBtn.Text = tostring(selectedMode) .. '  ▾'
+        local usesDistance = (selectedMode == 'SHOOTING2' or selectedMode == 'SHOOTING3' or selectedMode == 'PLAYMAKING')
+        if usesDistance and CONFIG.DISTANCES then
+            CONFIG.DISTANCES[selectedMode] = tonumber(selectedDistance) or CONFIG.DISTANCES[selectedMode]
+            -- Persist live override too only for distance-using modes
+            LIVE_DIST[selectedMode] = CONFIG.DISTANCES[selectedMode]
+            toast.Text = ('Applied: %s @ %s studs'):format(tostring(selectedMode), tostring(LIVE_DIST[selectedMode]))
+        else
+            toast.Text = ('Applied: %s'):format(tostring(selectedMode))
+        end
+        -- Auto-resume if previously stopped
+        if not RUNNING then
+            RUNNING = true
+            stopBtn.Text = 'Stop'
+            stopBtn.BackgroundColor3 = Color3.fromRGB(160, 55, 55)
+        end
+        task.delay(1.2, function()
+            if toast then toast.Text = '' end
+        end)
+    end)
+
+    stopBtn.MouseButton1Click:Connect(function()
+        RUNNING = not RUNNING
+        toast.Text = RUNNING and 'Started' or 'Stopped'
+        stopBtn.Text = RUNNING and 'Stop' or 'Start'
+        stopBtn.BackgroundColor3 = RUNNING and Color3.fromRGB(160, 55, 55) or Color3.fromRGB(65, 120, 85)
+        -- Attempt to cancel any active movement immediately
+        pcall(function()
+            if character then character:SetAttribute('MoveToPoint', Vector3.zero) end
+        end)
+        task.delay(1.0, function()
+            if toast then toast.Text = '' end
+        end)
+    end)
+
+    return panel
+end
+
+local function apply_mode_change(newMode)
+    if not newMode then return end
+    CONFIG.MODE = newMode
+    BADGE_TARGET = CONFIG.MODE
+    selectedMode = newMode
+    selectedHold = get_mode_hold(newMode)
+
+    local usesDistance = (newMode == 'SHOOTING2' or newMode == 'SHOOTING3' or newMode == 'PLAYMAKING')
+    if usesDistance then
+        local dist = get_active_distance(newMode)
+        if dist ~= nil then
+            selectedDistance = dist
+        else
+            selectedDistance = (CONFIG.DISTANCES and CONFIG.DISTANCES[newMode]) or selectedDistance
+        end
+        LIVE_DIST[newMode] = selectedDistance
+    end
+
+    local panel = ensure_mode_gui()
+    if not panel then return end
+
+    local dropdownBtn = panel:FindFirstChild('DropdownBtn')
+    if dropdownBtn then
+        dropdownBtn.Text = tostring(newMode) .. '  ▾'
+    end
+
+    local distDropdown = panel:FindFirstChild('DistDropdown')
+    local distOptions = panel:FindFirstChild('DistOptions')
+    if distDropdown then
+        distDropdown.Visible = usesDistance
+        if usesDistance then
+            distDropdown.Text = ('Dist: %s  ▾'):format(tostring(selectedDistance))
+        end
+    end
+    if distOptions and not usesDistance then
+        distOptions.Visible = false
+    end
+
+    local timingDrop = panel:FindFirstChild('TimingDropdown')
+    if timingDrop then
+        timingDrop.Text = ('Timer: %.2fs  ▾'):format(tonumber(selectedHold))
+    end
+
+    local toastLabel = panel:FindFirstChild('Toast')
+    if toastLabel then
+        toastLabel.Text = ('Mode auto-set: %s'):format(tostring(newMode))
+        task.delay(1.2, function()
+            if toastLabel and toastLabel.Parent then
+                toastLabel.Text = ''
+            end
+        end)
+    end
+end
+
+-- Build the mode GUI once
+ensure_mode_gui()
+
+-- Multi-mode sequencing: timer-based presets wait here, count-based handled in gameplay loop
+if MULTI_MODE_STATE.active and MULTI_MODE_STATE.seqType == 'timer' then
+    task.spawn(function()
+        local preset = MULTI_MODE_STATE.preset
+        if not preset then return end
+
+        local duration = MULTI_MODE_STATE.duration or 0
+        if duration > 0 then
+            local deadline = os.clock() + duration
+            while os.clock() < deadline do
+                task.wait(0.5)
+            end
+        end
+
+        if preset.second then
+            apply_mode_change(preset.second)
+            set_status(('Multi-mode sequence: switched to %s'):format(tostring(preset.second)))
+        end
+
+        MULTI_MODE_STATE.active = false
+        MULTI_MODE_STATE.seqType = nil
+        MULTI_MODE_STATE.preset = nil
+        MULTI_MODE_STATE.duration = 0
+    end)
+end
+
+local function track_multi_mode_finishing_rep(mode)
+    if mode ~= `FINISHING` then return end
+    if not (MULTI_MODE_STATE.active and MULTI_MODE_STATE.seqType == 'counts') then return end
+
+    local goal = MULTI_MODE_STATE.goal or 0
+    if goal <= 0 then return end
+
+    local now = os.clock()
+    local last = MULTI_MODE_STATE.lastTick or 0
+    if last > 0 and (now - last) < 0.75 then
+        return
+    end
+
+    MULTI_MODE_STATE.lastTick = now
+    MULTI_MODE_STATE.count = math.min(goal, (MULTI_MODE_STATE.count or 0) + 1)
+
+    if MULTI_MODE_STATE.count < goal then
+        set_status(string.format('Multi-mode FINISHING reps: %d / %d', MULTI_MODE_STATE.count, goal))
+        return
+    end
+
+    local preset = MULTI_MODE_STATE.preset or {}
+    MULTI_MODE_STATE.active = false
+    MULTI_MODE_STATE.seqType = nil
+    MULTI_MODE_STATE.goal = nil
+    MULTI_MODE_STATE.count = 0
+    MULTI_MODE_STATE.lastTick = 0
+    MULTI_MODE_STATE.preset = nil
+
+    if preset.second then
+        apply_mode_change(preset.second)
+        set_status(('Multi-mode sequence: switched to %s'):format(tostring(preset.second)))
+    end
+end
+
+-- Rebind character/root on respawn to keep references fresh
+local function bind_character(char)
+    character = char
+    root_part = character:WaitForChild('HumanoidRootPart')
+    -- Make sure the timer GUI exists after respawn as well
+    task.defer(ensure_server_timer_gui)
+    task.defer(ensure_mode_gui)
+end
+
+local_player.CharacterAdded:Connect(bind_character)
+
+-- Shared time-based sync helper for coordinating actions across main/alt without custom remotes
+local sync_state = { last = -1 }
+local function should_sync_fire()
+    if not (CONFIG.SYNC and CONFIG.SYNC.ENABLED) then return true end
+    local interval = (CONFIG.SYNC.INTERVAL or 0.5)
+    if interval <= 0 then return true end
+    local offset = (CONFIG.SYNC.OFFSET or 0)
+    local t = workspace.DistributedGameTime or 0
+    local idx = math.floor((t - offset) / interval)
+    if idx <= (sync_state.last or -1) then return false end
+    local phase = (t - offset) % interval
+    local rem = interval - phase
+    local window = (CONFIG.SYNC.WINDOW or 0.05) + (get_ping_ms() / 1000) * (CONFIG.SYNC.PING_FACTOR or 0.5)
+    -- Fire near the end of the beat (rem <= window) OR right after the beat (phase <= window)
+    if rem <= window or phase <= window then
+        sync_state.last = idx
+        return true
+    end
+    return false
+end
+
+-- Explicit cancel helper for readability (define before use)
+local function move_cancel()
+    character:SetAttribute('MoveToPoint', Vector3.zero)
+end
+
+-- Helper: get nearest valid ball from map.Balls (returns a BasePart)
+local function get_nearest_ball(map)
+    local balls = map:FindFirstChild('Balls')
+    if not balls then return nil end
+
+    local function part_for(inst)
+        if inst:IsA('BasePart') then return inst end
+        if inst:IsA('Model') then
+            if inst.PrimaryPart then return inst.PrimaryPart end
+            local p = inst:FindFirstChildWhichIsA('BasePart', true)
+            if p then return p end
+        end
+        return nil
+    end
+
+    local nearest, best = nil, math.huge
+    for _, child in ipairs(balls:GetChildren()) do
+        local part = part_for(child)
+        if part then
+            local d = (root_part.Position - part.Position).Magnitude
+            if d < best then
+                best = d
+                nearest = part
+            end
+        end
+    end
+    return nearest
+end
+
+-- Helper: check opponent presence
+local function has_opponent()
+    return players:FindFirstChild(account_two.USER_NAME) ~= nil
+end
+
+local function join_main_account()
+    local remotes = replicated_storage:WaitForChild(`Remotes`)
+    local friends_remote = remotes:WaitForChild(`Friends`)
+
+    friends_remote:FireServer({
+        FriendUser = account_two.USER_NAME;
+        Type = `TeleportToPlayer`;
+    })
+end
+
+local function move_to(point, callback)
+    if typeof(point) == `Instance` then
+        point = point.Position
+        point = Vector3.new(point.X, root_part.Position.Y, point.Z)
+    end
+    mark_activity()
+    character:SetAttribute(`MoveToPoint`, point) -- 0 cancels it
+end
+
+-- Wait until we're within maxDist studs of a target Instance/Vector3 (or until timeout seconds elapse)
+local function wait_until_near(target, maxDist, timeout)
+    local function getPos()
+        if typeof(target) == "Instance" then
+            return target and target.Position or root_part.Position
+        else
+            return target
+        end
+    end
+
+    local start = tick()
+    while true do
+        local p = getPos()
+        local d = (root_part.Position - Vector3.new(p.X, root_part.Position.Y, p.Z)).Magnitude
+        if d <= (maxDist or 4) then return true end
+        if timeout and (tick() - start) >= timeout then return false end
+        task.wait()
+    end
+end
+
+-- Wait until within `radius` and remain there for `stableFor` seconds; overall timeout ends with false
+local function wait_until_stable_near(target, radius, stableFor, timeout)
+    radius = radius or 2.8
+    stableFor = stableFor or 0.15
+    local function getPos()
+        if typeof(target) == "Instance" then
+            return target and target.Position or root_part.Position
+        else
+            return target
+        end
+    end
+
+    local start = tick()
+    local stableStart = nil
+    while true do
+        local p = getPos()
+        local d = (root_part.Position - Vector3.new(p.X, root_part.Position.Y, p.Z)).Magnitude
+        local near = d <= radius
+        if near then
+            stableStart = stableStart or tick()
+            if (tick() - stableStart) >= (stableFor or 0.15) then
+                return true
+            end
+        else
+            stableStart = nil
+        end
+        if timeout and (tick() - start) >= timeout then return false end
+        task.wait()
+    end
+end
+
+local function join_queue(value)
+    local queue_remote = replicated_storage:WaitForChild(`Queue`)
+
+    queue_remote:FireServer({
+        [value and `JoinQueue` or `LeaveQueue`] = true;
+    })
+end
+
+local function server_hop()
+    local http_service = game:GetService(`HttpService`)
+
+    local url = `https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true`
+    local body = http_service:JSONDecode(game:HttpGet(url))
+    local servers = {}
+
+    if body and body.data then
+        for i, v in next, body.data do
+            if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers) and v.playing < v.maxPlayers and v.id ~= job_id then
+                table.insert(servers, 1, v.id)
+            end
+        end
+    end
+
+    if #servers > 0 then
+        teleport_service:TeleportToPlaceInstance(place_id, servers[math.random(1, #servers)], local_player)
+    else
+        -- Fallback: try generic teleport to place (Roblox will pick an instance)
+        teleport_service:Teleport(place_id, local_player)
+    end
+end
+
+-- Safety-net teleport: after prolonged time in a server, attempt to go to Menu first, then fallback to Lobby
+local function safety_net_teleport()
+    if SAFETY_NET_ACTIVE then return end
+    -- Avoid interrupting play; wait until safe then proceed
+    if not safe_to_rejoin() then
+        task.delay(3, safety_net_teleport)
+        return
+    end
+    SAFETY_NET_ACTIVE = true
+
+    -- Try Menu (place 18474291382) first
+    local ok = pcall(function()
+        teleport_service:Teleport(18474291382, local_player)
+    end)
+
+    if not ok then
+        -- Immediate fallback to Lobby if Teleport call errored synchronously
+        SAFETY_NET_ACTIVE = false
+        pcall(function()
+            teleport_service:Teleport(18517963950, local_player)
+        end)
+        return
+    end
+
+    -- If teleport doesn't enter InProgress quickly, assume it didn't start; fallback to Lobby
+    task.delay(2.0, function()
+        if SAFETY_NET_ACTIVE then
+            SAFETY_NET_ACTIVE = false
+            pcall(function()
+                teleport_service:Teleport(18517963950, local_player)
+            end)
+        end
+    end)
+end
+
+local function tween_position(part, distance)
+    local root_position = root_part.Position
+    local part_position = part.Position
+
+    local target_position = Vector3.new(part_position.X, root_position.Y, part_position.Z)
+    local target_distance = Vector3.zero
+
+    local backward = -part.CFrame.LookVector
+
+    if distance then
+        target_distance = -backward * distance
+    end
+
+    local distance_to_travel = (root_position - target_position).Magnitude
+    local time = distance_to_travel / TWEEN_SETTINGS.SPEED
+
+    local tween_info = TweenInfo.new(time, Enum.EasingStyle[TWEEN_SETTINGS.STYLE], Enum.EasingDirection[TWEEN_SETTINGS.DIRECTION])
+
+    local tween = tween_service:Create(root_part, tween_info, {
+        CFrame = distance and CFrame.lookAt(target_position + target_distance, target_position)
+    })
+
+    tween:Play(); tween.Completed:Wait()
+end
+
+local function has_ball(character)
+    return character:FindFirstChild(`Ball`) ~= nil
+end
+
+if local_player.Name == MAIN_ACCOUNT_DATA.USER_NAME then
+    account_one = MAIN_ACCOUNT_DATA
+    account_two = ALT_ACCOUNT_DATA
+else
+    account_one = ALT_ACCOUNT_DATA
+    account_two = MAIN_ACCOUNT_DATA
+end
+
+local is_main_account = account_one == MAIN_ACCOUNT_DATA
+
+if place_id == 18474291382 then -- menu
+    set_status('Menu: preparing PlayerData…')
+    local slot_remote = replicated_storage:WaitForChild(`Remote`)
+
+    local build_slot = account_one.BUILD_SLOT
+
+    local player_data = local_player:WaitForChild(`PlayerData`)
+    local current_slot = player_data:WaitForChild(`CurrentSlot`)
+
+    -- Ensure the player is fully loaded before attempting slot set/teleport
+    wait_for_player_loaded(12)
+
+    -- Best-effort slot selection: try numeric first (most common), then string payload as fallback
+    local function set_slot()
+        local ok = pcall(function()
+            slot_remote:FireServer({
+                Action = `SetSlot`;
+                Slot = build_slot;
+            })
+        end)
+        if not ok then
+            pcall(function()
+                slot_remote:FireServer({
+                    Action = `SetSlot`;
+                    Slot = `{build_slot}`;
+                })
+            end)
+        end
+    end
+
+    set_status(string.format('Menu: selecting slot %s…', tostring(build_slot)))
+    set_slot()
+
+    -- Wait for the slot to apply, but don't get stuck forever
+    local deadline = os.clock() + 5
+    if current_slot.Value ~= build_slot then
+        while os.clock() < deadline do
+            local changedConn
+            changedConn = current_slot.Changed:Connect(function()
+                if current_slot.Value == build_slot and changedConn then changedConn:Disconnect() end
+            end)
+            -- If still not applied after 1s, try setting again
+            precise_wait(1.0)
+            if current_slot.Value == build_slot then break end
+            set_status('Menu: slot retry…')
+            set_slot()
+            if changedConn then changedConn:Disconnect() end
+        end
+    end
+
+    -- Always proceed to lobby; slot selection is best-effort but waiting for load helps reliability
+    -- If not yet marked loaded, wait a bit longer before teleporting to reduce TeleportInitFailed
+    if not (local_player:GetAttribute('Loaded') and local_player:GetAttribute('LoadedData')) then
+        precise_wait(1.5)
+    end
+    join_lobby()
+
+    -- Safety fallback: if still in menu after a bit, try again
+    task.delay(6, function()
+        if game.PlaceId == 18474291382 then
+            set_status('Menu: still here, re-trying lobby join…')
+            join_lobby()
+        end
+    end)
+elseif place_id == 18517963950 then -- lobby
+    local spots = workspace:WaitForChild(`Spots`)
+    local ones_spot = spots:WaitForChild(`1v1`)
+
+    players.PlayerAdded:Connect(function(player)
+        player.CharacterAdded:Connect(function(character)
+            if player.Name == account_one.USER_NAME or player.Name == account_two.USER_NAME then
+                return
+            end
+            character:Destroy()
+        end)
+    end)
+
+    for _, player in players:GetPlayers() do
+        if player.Name == account_one.USER_NAME or player.Name == account_two.USER_NAME then
+            continue
+        end
+
+        local character_ = player.Character
+
+        if not character_ then
+            continue
+        end
+
+        character_:Destroy()
+    end
+
+    while task.wait() do
+        if character:GetAttribute(`InQueue`) then
+            break
+        end
+
+        local account_two_player = players:FindFirstChild(account_two.USER_NAME)
+
+        if not account_two_player then
+            if not is_main_account then
+                join_main_account()
+            end
+
+            continue
+        end
+
+        if not (account_two_player:GetAttribute(`Loaded`) and account_two_player:GetAttribute(`LoadedData`)) then
+            continue
+        end
+
+        local account_two_character = account_two_player.Character or account_two_player.CharacterAdded:Wait()
+        local account_two_root_part = account_two_character:WaitForChild(`HumanoidRootPart`)
+
+        move_to(ones_spot)
+
+        local distance_from_account_two = (root_part.Position - account_two_root_part.Position).Magnitude
+        local distance_from_spot = (root_part.Position - ones_spot.Position).Magnitude
+        local account_two_from_spot = (ones_spot.Position - account_two_root_part.Position).Magnitude
+
+        if distance_from_account_two < 5 and distance_from_spot < 5 and account_two_from_spot < 5 then
+            break
+        end
+    end
+
+    move_to(Vector3.zero)
+
+    task.wait(QUEUE_DELAY)
+
+    join_queue(true)
+
+    task.delay(QUEUE_TIMEOUT, function()
+        join_queue(false)
+
+        while task.wait() do
+            if is_main_account then
+                server_hop()
+            else
+                join_main_account()
+            end
+        end
+    end)
+elseif place_id == 18517967096 then -- game
+    local account_two_player
+
+    task.spawn(function()
+        while task.wait() do
+            if #players:GetPlayers() == 1 then
+                continue
+            end            
+
+            if #players:GetPlayers() > 2 then
+                join_lobby()
+            end
+
+            account_two_player = players:FindFirstChild(account_two.USER_NAME)
+
+            if account_two_player then
+                break
+            end
+
+            join_lobby()
+        end
+    end)
+
+    local start = tick()
+
+    local court
+
+    repeat task.wait()
+        if tick() - start > QUEUE_TIMEOUT then
+            join_lobby(); continue
+        end
+
+        court = character:GetAttribute(`InGame`)
+    until court and court ~= ``
+
+    task.spawn(function()
+        if is_main_account then
+            return
+        end
+
+        repeat task.wait() until court and court ~= ``
+
+        start = tick()
+
+        while task.wait() do
+            if tick() - start < GAME_DURATION then
+                continue
+            end
+
+            join_lobby()
+        end
+    end)
+
+    local remotes = replicated_storage:WaitForChild(`Remotes`)
+    local server_remotes = remotes:WaitForChild(`Server`)
+    local action_remote = server_remotes:WaitForChild(`Action`)
+
+    -- Helper to double-check current mode at call time
+    local function is_playmaking_mode()
+        return CONFIG and (CONFIG.MODE == `PLAYMAKING`)
+    end
+
+    -- If the ALT leaves, immediately interrupt and finish the game with a timed mid (green)
+    if is_main_account then
+        local finish_once = false
+        task.spawn(function()
+            while not finish_once do
+                task.wait(0.1)
+                if players:FindFirstChild(account_two.USER_NAME) then
+                    continue
+                end
+                finish_once = true
+                -- Hard interrupt any ongoing action
+                pcall(move_cancel)
+                pcall(function() action_remote:FireServer({ Sprinting = false; Type = `Sprint`; }) end)
+
+                -- Ensure we grab a ball quickly
+                local balls = workspace:WaitForChild(`Map`):WaitForChild(`Balls`)
+                local grabStart = os.clock()
+                while (not has_ball(character)) and (os.clock() - grabStart) < 6 do
+                    local kids = balls:GetChildren()
+                    local ball = kids[2] or kids[1]
+                    if ball then move_to(ball) end
+                    task.wait(0.2)
+                end
+
+                -- Move to mid range and take a green-timed shot
+                local dist = (CONFIG.DISTANCES and CONFIG.DISTANCES.SHOOTING2) or 25
+                tween_position(goal, dist)
+                local hold = (CONFIG.TIMING == true) and (get_mode_hold('SHOOTING2')) or 0.4
+                shoot_with_hold(hold)
+            end
+        end)
+    end
+
+    -- Dribble spammer for PLAYMAKING (main account): spam in cycles (7s on, 4s off by default)
+    do
+        task.spawn(function()
+            while true do
+                local cfg = CONFIG and CONFIG.DRIBBLE_SPAM
+                if RUNNING and is_main_account and is_playmaking_mode() and cfg and cfg.ENABLED ~= false then
+                    local rate = (cfg.RATE or 0.03)
+                    local spamWin = (cfg.SPAM_WINDOW or 7)
+                    local breakWin = (cfg.BREAK_WINDOW or 4)
+                    -- Spam window
+                    local sStart = os.clock()
+                    while RUNNING and is_main_account and is_playmaking_mode() and ((os.clock() - sStart) < spamWin) do
+                        local act = character and character:GetAttribute(`Action`)
+                        if act ~= `Shooting` and is_playmaking_mode() then -- double-check right before firing
+                            mark_activity()
+                            action_remote:FireServer({ Keys = `H`; Type = `Dribble`; })
+                            task.wait(rate)
+                        else
+                            task.wait(math.max(rate, 0.05))
+                        end
+                    end
+                    -- Break window
+                    local bStart = os.clock()
+                    while RUNNING and is_main_account and is_playmaking_mode() and ((os.clock() - bStart) < breakWin) do
+                        task.wait(0.1)
+                    end
+                else
+                    task.wait(0.1)
+                end
+            end
+        end)
+    end
+
+    local main_account_character
+    local main_account_root_part
+
+    if not is_main_account then
+        main_account_character = account_two_player.Character or account_two_player.CharacterAdded:Wait()
+        main_account_root_part = main_account_character:WaitForChild(`HumanoidRootPart`)
+    end
+
+    local map = workspace:WaitForChild(`Map`)
+    local courts = map:WaitForChild(`Courts`)
+    court = courts[court]
+
+    local hoop = court:WaitForChild(`Hoop2`)
+    local rim = hoop:WaitForChild(`Rim`)
+    local goal = rim:WaitForChild(`Goal`)
+
+    local function sprint(value)
+            if value then mark_activity() end
+        action_remote:FireServer({
+            Sprinting = value;
+            Type = `Sprint`;
+        })
+    end
+
+    local function shoot()
+        -- Resolve timing based on CONFIG
+        local hold
+        if CONFIG.TIMING == true then
+            -- Prefer per-mode hold when available
+            hold = get_mode_hold(CONFIG and CONFIG.MODE)
+        else
+            if CONFIG.MISTIME == `late` then
+                hold = 2 -- long hold to miss late
+            else
+                hold = 0 -- instant release to miss early
+            end
+        end
+
+    mark_activity()
+    action_remote:FireServer({ Shoot = true; Type = `Shoot` })
+    -- Wait exactly the configured hold with high precision to prevent late releases
+    precise_wait(math.max(0, hold))
+    action_remote:FireServer({ Shoot = false; Type = `Shoot` })
+    mark_activity()
+    end
+
+    local function get_shot_hold()
+        if CONFIG.TIMING == true then return get_mode_hold(CONFIG and CONFIG.MODE) end
+        return (CONFIG.MISTIME == `late`) and 2 or 0
+    end
+
+    -- One-off shot helper with explicit hold override (used when alt leaves so we can score)
+    local function shoot_with_hold(hold)
+        hold = hold or 0.4
+    mark_activity()
+    action_remote:FireServer({ Shoot = true; Type = `Shoot` })
+    -- Hold for the requested duration with high precision
+    precise_wait(math.max(0, hold))
+    action_remote:FireServer({ Shoot = false; Type = `Shoot` })
+    mark_activity()
+    end
+
+    while task.wait() do
+        if not RUNNING then
+            move_cancel()
+            sprint(false)
+            continue
+        end
+        if not is_main_account then
+            -- ALT behavior
+            local hasBall = has_ball(character)
+            if hasBall then
+                -- On possession: go to spot and shoot once per possession (timing outcome doesn't matter)
+                if not alt_shot_done then
+                    tween_position(goal, 70)
+                    -- Quick tap shot; timing/green doesn't matter here
+                    shoot_with_hold(0.05)
+                    alt_shot_done = true
+                end
+                continue
+            else
+                -- Reset flag when ball is lost to allow shooting next time
+                if alt_shot_done then alt_shot_done = false end
+            end
+
+            -- If not in PLAYMAKING, still position at the shooting spot even off-ball
+            if CONFIG.MODE ~= `PLAYMAKING` then
+                tween_position(goal, 70)
+                continue
+            end
+
+            -- PLAYMAKING: hover near main and reach
+            if CONFIG.MODE == `PLAYMAKING` then
+                tween_position(main_account_root_part, 5)
+                -- Reach immediately (no sync gating) to mirror fixedplay behavior
+                mark_activity()
+                action_remote:FireServer({
+                    Action = `Reach`;
+                    Reach = true;
+                })
+            end
+
+            continue
+        elseif not players:FindFirstChild(account_two.USER_NAME) then
+            -- Alt/opponent left: ensure we can finish the game by scoring a quick mid with green timing
+            if not has_ball(character) then
+                local balls = map:WaitForChild(`Balls`)
+                local kids = balls:GetChildren()
+                local ball = kids[2] or kids[1]
+                if ball then
+                    move_to(ball)
+                end
+                continue
+            end
+
+            -- Use a fixed/default mid distance (do not use live override) just to end the game
+            local dist = (CONFIG.DISTANCES and CONFIG.DISTANCES.SHOOTING2) or 25
+            tween_position(goal, dist)
+            -- Force a one-time green release regardless of CONFIG.TIMING
+            shoot_with_hold(0.4)
+            continue
+        end
+
+        if not has_ball(character) then
+            local balls = map:WaitForChild(`Balls`)
+            local ball = balls:GetChildren()[2] -- already a ball for some reason but we need the second one
+
+            if not ball then
+                continue
+            end
+
+            move_to(ball); continue
+        end
+
+        if character:GetAttribute(`Action`) == `Shooting` then
+            continue
+        end
+
+        -- Determine target distance from CONFIG for the active mode
+        local mode = CONFIG.MODE
+        local distances = CONFIG.DISTANCES
+
+        if mode == `FINISHING` or mode == `DEFENDING` then
+            -- Exact fixedplay FINISHING/DEFENDING behavior: sprint + hold forward, no pre-steps
+            -- Mark critical section so reconnects don't interrupt the layup
+            CRITICAL_ACTION = true
+            sprint(true)
+            move_to(goal)
+
+            -- Keep forward held toward the hoop during the approach (fixedplay pattern)
+            local rs = game:GetService('RunService')
+            local conn; conn = rs.RenderStepped:Connect(function()
+                local dir = (goal.Position - root_part.Position)
+                if dir.Magnitude > 0 then
+                    local_player:Move(dir.Unit)
+                else
+                    local_player:Move(Vector3.zero)
+                end
+            end)
+
+            -- Wait until close enough to register a layup, then shoot while still sprinting/holding forward
+            wait_until_near(goal, 3, 2) -- within ~3 studs or up to 2s
+            shoot()
+
+            -- Stop holding forward right after the release and end sprint
+            if conn then conn:Disconnect() end
+            sprint(false)
+
+            -- Cancel any remaining walk target
+            move_to(Vector3.zero)
+            CRITICAL_ACTION = false
+            track_multi_mode_finishing_rep(mode)
+        elseif mode == `SHOOTING2` or mode == `SHOOTING3` then
+            CRITICAL_ACTION = true
+            mark_activity()
+            local dist = (mode == `SHOOTING3`) and (get_active_distance('SHOOTING3') or distances.SHOOTING3)
+                or (get_active_distance('SHOOTING2') or distances.SHOOTING2)
+            tween_position(goal, dist)
+            shoot()
+            CRITICAL_ACTION = false
+        elseif mode == `PLAYMAKING` then
+            local pdist = get_active_distance('PLAYMAKING') or distances.PLAYMAKING
+            tween_position(goal, pdist)
+            -- Dribble calls are now spammed by the background spammer; keep branch lightweight
+        end
+    end
+end
