@@ -23,7 +23,7 @@
 local CONFIG = {
     WEBHOOK_URL   = "https://discord.com/api/webhooks/1524576120861888563/dLmQyg2GPXS5y7WRlDc2FYmOJQdOmxv-sSBOxog4LGWuVzYZCjBs8lhOfeQu57k-EtQp",
     WHITELIST_URL = "https://raw.githubusercontent.com/VAILXV/nobro/refs/heads/main/hwid.Lua",
-    KICK_MESSAGE  = "Please wait to be whitelisted.",
+    KICK_MESSAGE  = "CAUGHT YO GOOFY AH",
 }
 --=============================================================================--
 
