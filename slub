@@ -8,7 +8,7 @@ _G.WideOpenDist = 1
 
 if game.PlaceId == 85959597177250 then
 	local blacklistedUsers = {
-		["waterpro112"] = true,
+		["roblox_user_7775181539"] = true,
 		["bigceuchie"] = true
 	}
 
