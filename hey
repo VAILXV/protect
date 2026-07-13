@@ -49,7 +49,7 @@ local MULTI_MODE_STATE = {
 
 -- Account slot picker: set build slots/usernames here for easy access
 local MAIN_ACCOUNT_DATA = {
-    BUILD_SLOT = 2;
+    BUILD_SLOT = 1;
     USER_NAME = `sIimefrl`;
 }
 
