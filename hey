@@ -61,7 +61,7 @@ local ALT_ACCOUNT_DATA = {
 -- Centralized behavior config so you only edit here
 local CONFIG = {
     -- MODE options: `FINISHING` | `DEFENDING` | `SHOOTING2` (mid/2s) | `SHOOTING3` (3s) | `PLAYMAKING`
-    MODE = `SHOOTING2`;
+    MODE = `DEFENDING`;
 
     -- TIMING behavior: true for good timing (~0.4s), false to intentionally mistime (early or late)
     TIMING = false; -- true = green timing, false = mistime
