@@ -24,7 +24,7 @@ end)
 -- Multi-mode controller: optionally chain two modes with a timer for the first phase
 local MULTI_MODE = {
     ENABLED = false;     -- set true to activate multi-mode sequencing
-    PRESET = 4;          -- 1..5 (see MULTI_MODE_PRESETS below)
+    PRESET = 1;          -- 1..5 (see MULTI_MODE_PRESETS below)
     FIRST_PHASE_MINUTES = 3; -- how long to run the first mode before switching (timer presets)
     FINISHING_REPS = 5;  -- used by preset 5: number of FINISHING reps before switching
 }
@@ -184,7 +184,7 @@ do
     end
 end
 
-local QUEUE_TIMEOUT = 30
+local QUEUE_TIMEOUT = 17
 local QUEUE_DELAY = 3
 
 -- Backwards compat alias (older code paths use this name); now driven by CONFIG.MODE
