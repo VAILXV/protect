@@ -61,7 +61,7 @@ local ALT_ACCOUNT_DATA = {
 -- Centralized behavior config so you only edit here
 local CONFIG = {
     -- MODE options: `FINISHING` | `DEFENDING` | `SHOOTING2` (mid/2s) | `SHOOTING3` (3s) | `PLAYMAKING`
-    MODE = `DEFENDING`;
+    MODE = `SHOOTING2`;
 
     -- TIMING behavior: true for good timing (~0.4s), false to intentionally mistime (early or late)
     TIMING = false; -- true = green timing, false = mistime
@@ -101,7 +101,7 @@ local CONFIG = {
     DISTANCES = {
         FINISHING = 10;   -- layups/finishing
         DEFENDING = 10;   -- mirrored to finishing distance
-        SHOOTING2 = 25;   -- 2-point shots
+        SHOOTING2 = 15;   -- 2-point shots
         SHOOTING3 = 43;   -- 3-point shots ("like 30/35")
         PLAYMAKING = 25;  -- space for dribble actions
     };
