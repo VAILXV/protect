@@ -100,7 +100,7 @@ local CONFIG = {
     -- Distance map per mode; tweak once and forget
     DISTANCES = {
         FINISHING = 10;   -- layups/finishing
-        DEFENDING = 10;   -- mirrored to finishing distance
+        DEFENDING = 15;   -- mirrored to finishing distance
         SHOOTING2 = 15;   -- 2-point shots
         SHOOTING3 = 43;   -- 3-point shots ("like 30/35")
         PLAYMAKING = 25;  -- space for dribble actions
