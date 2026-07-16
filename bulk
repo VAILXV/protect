@@ -572,6 +572,37 @@ if game.PlaceId == 18517967096 then
     end
  
     ------------------------------------------------------------
+    -- 🚪 If Bot isn't in this server, wait 5s then return to lobby
+    ------------------------------------------------------------
+    if localPlayer.Name ~= _G.Bot then
+        task.spawn(function()
+            local TeleportService = game:GetService("TeleportService")
+ 
+            local function botInServer()
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p.Name == _G.Bot then return true end
+                end
+                return false
+            end
+ 
+            while true do
+                task.wait(1)
+                if not botInServer() then
+                    print("[MATCH] Bot missing — waiting 5s before returning to lobby...")
+                    task.wait(5)
+                    if not botInServer() then
+                        print("[MATCH] Bot still missing — teleporting back to lobby 18517963950.")
+                        TeleportService:Teleport(18517963950, localPlayer)
+                        break
+                    else
+                        print("[MATCH] Bot came back — staying.")
+                    end
+                end
+            end
+        end)
+    end
+ 
+    ------------------------------------------------------------
     -- Finishing Action Logic
     ------------------------------------------------------------
     local function runFinishingActions()
