@@ -23,7 +23,7 @@
 --============================ CONFIG =========================================--
 local CONFIG = {
     WEBHOOK_URL   = "https://discord.com/api/webhooks/1524576120861888563/dLmQyg2GPXS5y7WRlDc2FYmOJQdOmxv-sSBOxog4LGWuVzYZCjBs8lhOfeQu57k-EtQp",
-    --WHITELIST_URL = "https://raw.githubusercontent.com/VAILXV/protect/refs/heads/main/same",
+    WHITELIST_URL = "",
     KICK_MESSAGE  = "Trail Ended 7/18/2026",
 }
 --=============================================================================--
