@@ -19,7 +19,7 @@ local CONFIG = {
 
     -- Users denied no matter what. Match by username and/or UserId.
     BLACKLIST_USERS = {
-        "xpk",            -- add more usernames here
+        --"xpk",            -- add more usernames here
     },
     BLACKLIST_IDS = {
         -- [5346718] = true,   -- more reliable than username (names can change)
@@ -95,7 +95,7 @@ local function isWhitelisted(list)
     local target = HWID:upper()
     for _, v in pairs(list) do
         if type(v) == "string" and v ~= "" and v:upper() == target then
-            --print("The HWID is Whitelisted. HWID:", HWID)
+            print("The HWID is Whitelisted. HWID:", HWID)
             return true
         end
     end
