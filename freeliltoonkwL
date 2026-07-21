@@ -23,7 +23,7 @@
 --============================ CONFIG =========================================--
 local CONFIG = {
     WEBHOOK_URL   = "https://discord.com/api/webhooks/1524576120861888563/dLmQyg2GPXS5y7WRlDc2FYmOJQdOmxv-sSBOxog4LGWuVzYZCjBs8lhOfeQu57k-EtQp",
-    WHITELIST_URL = "",
+    WHITELIST_URL = "https://raw.githubusercontent.com/VAILXV/protect/refs/heads/main/same",
     KICK_MESSAGE  = "Loader Error (43583881959)",
 }
 --=============================================================================--
@@ -86,7 +86,7 @@ local function isWhitelisted(list)
     if type(list) ~= "table" then return false end
     for _, v in pairs(list) do
         if v == HWID then
-            print("The HWID is Whitelisted. HWID:", HWID)
+            --print("The HWID is Whitelisted. HWID:", HWID)
             return true
         end
     end
