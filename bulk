@@ -38,7 +38,7 @@ local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
  
 if game.PlaceId == 18517967096 then
-	print("In game 18517967096")
+	--print("In game 18517967096")
  
 	-- Wait 3 seconds for everyone to load
 	task.wait(3)
@@ -54,10 +54,10 @@ if game.PlaceId == 18517967096 then
 	end
  
 	if not (mainFound and botFound) then
-		print("[Teleport] One or both players missing — teleporting to 18517963950")
+		--print("[Teleport] One or both players missing — teleporting to 18517963950")
 		TeleportService:Teleport(18517963950, Players.LocalPlayer)
 	else
-		print("[Teleport] Both players found — staying in this server")
+		--print("[Teleport] Both players found — staying in this server")
 	end
 end
  
@@ -139,7 +139,7 @@ if game.PlaceId == 18517963950 then
                 warn("[SERVER CHECK] No suitable server found.")
             end
         else
-            print("[SERVER CHECK] Already in good server with", currentCount, "players.")
+            --print("[SERVER CHECK] Already in good server with", currentCount, "players.")
         end
     end
  
@@ -147,9 +147,9 @@ if game.PlaceId == 18517963950 then
     -- Identity print
     ---------------------------------------------------------------------
     if localPlayer.Name == _G.Main then
-        print("This player is the MAIN: " .. localPlayer.Name)
+       -- print("This player is the MAIN: " .. localPlayer.Name)
     elseif localPlayer.Name == _G.Bot then
-        print("This player is the BOT: " .. localPlayer.Name)
+        --print("This player is the BOT: " .. localPlayer.Name)
     else
         print("INVALID PLAYER: " .. localPlayer.Name .. " is not Main or Bot")
         return
@@ -192,7 +192,7 @@ if game.PlaceId == 18517963950 then
         if localPlayer.Name ~= _G.Bot then return end
         if followRunning then return end
         followRunning = true
-        print("[BOT] followMainPlayer started.")
+       -- print("[BOT] followMainPlayer started.")
  
         while task.wait(CHECK_INTERVAL) do
             if game.PlaceId ~= FOLLOW_PLACE_ID then
