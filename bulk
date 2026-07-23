@@ -4,21 +4,21 @@
 ---------------------------------------------------------------------
 do
     local Players = game:GetService("Players")
- 
+
     local function isProtected(player)
         return player == Players.LocalPlayer
             or player.Name == _G.Bot
             or player.Name == _G.Main
     end
- 
+
     local function removePlayerCharacter(player)
         if isProtected(player) then return end
- 
+
         local character = player.Character
         if character then
             character:Destroy()
         end
- 
+
         player.CharacterAdded:Connect(function(char)
             if not isProtected(player) then
                 task.wait()
@@ -26,25 +26,25 @@ do
             end
         end)
     end
- 
+
     for _, player in ipairs(Players:GetPlayers()) do
         removePlayerCharacter(player)
     end
- 
+
     Players.PlayerAdded:Connect(removePlayerCharacter)
 end
- 
+
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
- 
+
 if game.PlaceId == 18517967096 then
 	--print("In game 18517967096")
- 
+
 	-- Wait 3 seconds for everyone to load
 	task.wait(3)
- 
+
 	local mainFound, botFound = false, false
- 
+
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player.Name == _G.Main then
 			mainFound = true
@@ -52,46 +52,46 @@ if game.PlaceId == 18517967096 then
 			botFound = true
 		end
 	end
- 
+
 	if not (mainFound and botFound) then
-		--print("[Teleport] One or both players missing — teleporting to 18517963950")
+		print("[Teleport] One or both players missing — teleporting to 18517963950")
 		TeleportService:Teleport(18517963950, Players.LocalPlayer)
 	else
 		--print("[Teleport] Both players found — staying in this server")
 	end
 end
- 
- 
+
+
 if game.PlaceId == 18517963950 then
- 
+
     local Players = game:GetService("Players")
     local HttpService = game:GetService("HttpService")
     local TeleportService = game:GetService("TeleportService")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local VirtualInputManager = game:GetService("VirtualInputManager")
     local RunService = game:GetService("RunService")
- 
+
     --// Config
     local localPlayer = Players.LocalPlayer
- 
+
     --// Settings
     local CHECK_INTERVAL = 2
     local FOLLOW_PLACE_ID = 18517963950
-    local TARGET_PLAYER_COUNT = 10
-    local MIN_PLAYERS = 15
-    local MAX_PLAYERS = 20
+    local TARGET_PLAYER_COUNT = 7
+    local MIN_PLAYERS = 4
+    local MAX_PLAYERS = 15
     local PLACE_ID = game.PlaceId
     local teleportPosition = Vector3.new(-176, 32, 49) -- fallback only (used if Spots.1v1 is missing)
- 
+
     ---------------------------------------------------------------------
     -- ✅ MAIN: Find better server if not near 10 players
     ---------------------------------------------------------------------
     if localPlayer.Name == _G.Main then
         local currentCount = #Players:GetPlayers()
- 
+
         if currentCount < MIN_PLAYERS or currentCount > MAX_PLAYERS then
             print("[SERVER CHECK] Player count is", currentCount, "- searching for better server...")
- 
+
             local function listServers(cursor)
                 local url = string.format(
                     "https://games.roblox.com/v1/games/%s/servers/Public?sortOrder=Asc&limit=100",
@@ -110,7 +110,7 @@ if game.PlaceId == 18517963950 then
                     return nil
                 end
             end
- 
+
             local bestServer, bestDiff, cursor = nil, math.huge, nil
             repeat
                 local servers = listServers(cursor)
@@ -130,7 +130,7 @@ if game.PlaceId == 18517963950 then
                 end
                 cursor = servers.nextPageCursor
             until not cursor or (bestServer and bestServer.playing == TARGET_PLAYER_COUNT)
- 
+
             if bestServer then
                 print(string.format("[SERVER CHECK] Teleporting to server with %d players (ID: %s)", bestServer.playing, bestServer.id))
                 TeleportService:TeleportToPlaceInstance(PLACE_ID, bestServer.id, localPlayer)
@@ -139,22 +139,22 @@ if game.PlaceId == 18517963950 then
                 warn("[SERVER CHECK] No suitable server found.")
             end
         else
-            --print("[SERVER CHECK] Already in good server with", currentCount, "players.")
+            print("[SERVER CHECK] Already in good server with", currentCount, "players.")
         end
     end
- 
+
     ---------------------------------------------------------------------
     -- Identity print
     ---------------------------------------------------------------------
     if localPlayer.Name == _G.Main then
-       -- print("This player is the MAIN: " .. localPlayer.Name)
+        print("This player is the MAIN: " .. localPlayer.Name)
     elseif localPlayer.Name == _G.Bot then
-        --print("This player is the BOT: " .. localPlayer.Name)
+        print("This player is the BOT: " .. localPlayer.Name)
     else
         print("INVALID PLAYER: " .. localPlayer.Name .. " is not Main or Bot")
         return
     end
- 
+
     ---------------------------------------------------------------------
     -- Check if a player is in the same server
     ---------------------------------------------------------------------
@@ -166,68 +166,68 @@ if game.PlaceId == 18517963950 then
         end
         return false
     end
- 
+
     ---------------------------------------------------------------------
     -- BOT: Follow Main player
     ---------------------------------------------------------------------
     -- Guard so only ONE follow loop can ever run at a time (they used to
     -- stack up and keep firing teleports after Main was already found)
     local followRunning = false
- 
+
     -- Should the bot actually try to follow right now?
     local function botShouldFollow()
         -- Main is already in this server → nothing to follow
         if isPlayerInServer(_G.Main) then return false end
- 
+
         -- We're queued up → Main vanishing means the MATCH is starting and
         -- our own teleport is about to fire. Following now would drag the
         -- bot into Main's game server as a stuck spectator.
         local char = localPlayer.Character
         if char and char:GetAttribute("InQueue") then return false end
- 
+
         return true
     end
- 
+
     local function followMainPlayer()
         if localPlayer.Name ~= _G.Bot then return end
         if followRunning then return end
         followRunning = true
-       -- print("[BOT] followMainPlayer started.")
- 
+        --print("[BOT] followMainPlayer started.")
+
         while task.wait(CHECK_INTERVAL) do
             if game.PlaceId ~= FOLLOW_PLACE_ID then
-                print("[BOT] Not in follow place ID yet.")
+                --print("[BOT] Not in follow place ID yet.")
                 continue
             end
- 
+
             if not botShouldFollow() then
                 print("[BOT] Follow no longer needed — stopping follow loop.")
                 break
             end
- 
+
             local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
             local friendsRemote = remotesFolder and remotesFolder:FindFirstChild("Friends")
- 
+
             if friendsRemote then
                 local args = {
                     { FriendUser = _G.Main, Type = "TeleportToPlayer" }
                 }
                 friendsRemote:FireServer(unpack(args))
-                print("[BOT] Attempting to follow " .. _G.Main)
+                --print("[BOT] Attempting to follow " .. _G.Main)
             else
                 warn("[BOT] Friends remote missing or nil.")
             end
         end
- 
+
         followRunning = false
     end
- 
+
     ---------------------------------------------------------------------
     -- MAIN & BOT: Queue logic (attribute-based: single join + timeout hop)
     ---------------------------------------------------------------------
     local QUEUE_DELAY = 3
     local QUEUE_TIMEOUT = _G.QueueTime or 17
- 
+
     local function joinQueue(value)
         local queueRemote = ReplicatedStorage:WaitForChild("Queue")
         queueRemote:FireServer({
@@ -235,7 +235,7 @@ if game.PlaceId == 18517963950 then
         })
         print(value and "[QUEUE] JoinQueue fired." or "[QUEUE] LeaveQueue fired.")
     end
- 
+
     local function serverHop()
         local url = string.format(
             "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true",
@@ -244,7 +244,7 @@ if game.PlaceId == 18517963950 then
         local ok, body = pcall(function()
             return HttpService:JSONDecode(game:HttpGet(url))
         end)
- 
+
         local servers = {}
         if ok and body and body.data then
             for _, v in next, body.data do
@@ -254,7 +254,7 @@ if game.PlaceId == 18517963950 then
                 end
             end
         end
- 
+
         if #servers > 0 then
             TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], localPlayer)
         else
@@ -262,17 +262,17 @@ if game.PlaceId == 18517963950 then
             TeleportService:Teleport(game.PlaceId, localPlayer)
         end
     end
- 
+
     local function startQueueLogic()
         local spots = workspace:WaitForChild("Spots")
         local onesSpot = spots:WaitForChild("1v1")
- 
+
         local otherName = (localPlayer.Name == _G.Main) and _G.Bot or _G.Main
- 
+
         -- persistent camera-walk toward the spot (start/stop as needed)
         local walkConn = nil
         local lastPress = 0
- 
+
         local function stopWalking()
             if walkConn then
                 walkConn:Disconnect()
@@ -281,7 +281,7 @@ if game.PlaceId == 18517963950 then
                 workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
             end
         end
- 
+
         local function startWalking()
             if walkConn then return end
             local camera = workspace.CurrentCamera
@@ -289,16 +289,16 @@ if game.PlaceId == 18517963950 then
             VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
             lastPress = tick()
             print("[WALK] Walking to 1v1 spot:", onesSpot.Position)
- 
+
             walkConn = RunService.RenderStepped:Connect(function()
                 local char = localPlayer.Character
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
                 if not hrp then return end
- 
+
                 local target = onesSpot.Position
                 local flatTarget = Vector3.new(target.X, hrp.Position.Y, target.Z)
                 local dist = (flatTarget - hrp.Position).Magnitude
- 
+
                 -- keep camera behind the character, looking at the spot
                 if dist > 0.1 then
                     local dir = (flatTarget - hrp.Position).Unit
@@ -307,7 +307,7 @@ if game.PlaceId == 18517963950 then
                         flatTarget
                     )
                 end
- 
+
                 -- 🔁 re-hold W every 0.25s so mouse clicks can't cancel the walk
                 if tick() - lastPress >= 0.25 then
                     lastPress = tick()
@@ -315,7 +315,7 @@ if game.PlaceId == 18517963950 then
                 end
             end)
         end
- 
+
         ---------------------------------------------------------------
         -- 1) Wait until both players are here, loaded, and at the spot
         ---------------------------------------------------------------
@@ -324,38 +324,38 @@ if game.PlaceId == 18517963950 then
                 stopWalking()
                 return
             end
- 
+
             local char = localPlayer.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
- 
+
             -- already in queue? skip straight ahead
             if char and char:GetAttribute("InQueue") then
                 stopWalking()
                 break
             end
- 
+
             local otherPlayer = Players:FindFirstChild(otherName)
             if not otherPlayer then
                 -- other account not here yet (bot's follow loops handle chasing Main)
                 stopWalking()
                 continue
             end
- 
+
             -- wait for the other account's data to fully load
             if not (otherPlayer:GetAttribute("Loaded") and otherPlayer:GetAttribute("LoadedData")) then
                 continue
             end
- 
+
             local otherChar = otherPlayer.Character
             local otherRoot = otherChar and otherChar:FindFirstChild("HumanoidRootPart")
             if not (hrp and otherRoot) then
                 continue
             end
- 
+
             local distFromOther = (hrp.Position - otherRoot.Position).Magnitude
             local distFromSpot = (hrp.Position - onesSpot.Position).Magnitude
             local otherFromSpot = (onesSpot.Position - otherRoot.Position).Magnitude
- 
+
             -- 🚶 camera-walk toward the spot, with hysteresis:
             -- stop once within 3.5 studs, and only start again if we
             -- drift past 6 — prevents the camera rapidly toggling
@@ -369,21 +369,21 @@ if game.PlaceId == 18517963950 then
                     startWalking()
                 end
             end
- 
+
             -- both players on the spot and near each other → ready
             if distFromOther < 5 and distFromSpot < 5 and otherFromSpot < 5 then
                 break
             end
         end
- 
+
         stopWalking()
- 
+
         ---------------------------------------------------------------
         -- 2) Small delay, then a single JoinQueue
         ---------------------------------------------------------------
         task.wait(QUEUE_DELAY)
         joinQueue(true)
- 
+
         ---------------------------------------------------------------
         -- 3) Still here after QUEUE_TIMEOUT? Leave queue and hop
         ---------------------------------------------------------------
@@ -391,7 +391,7 @@ if game.PlaceId == 18517963950 then
             if _G.Stop then return end
             print("[QUEUE] Timed out after " .. QUEUE_TIMEOUT .. "s — leaving queue and hopping.")
             joinQueue(false)
- 
+
             while task.wait(1) do
                 if _G.Stop then break end
                 if localPlayer.Name == _G.Main then
@@ -412,7 +412,7 @@ if game.PlaceId == 18517963950 then
             end
         end)
     end
- 
+
     ---------------------------------------------------------------------
     -- Run logic
     ---------------------------------------------------------------------
@@ -431,62 +431,62 @@ if game.PlaceId == 18517963950 then
             end
         end)
     end
- 
+
     -- ✅ Start the queue logic (readiness gating is built into it)
     task.spawn(startQueueLogic)
 end
- 
+
     ---------------------------------------------------------------------
--- MAIN: If still in this same lobby server after _G.WaitTime seconds,
--- find a new server
+-- MAIN & BOT: If still in this same lobby server after _G.WaitTime
+-- seconds, find a new server (the bot then re-finds Main by following)
 ---------------------------------------------------------------------
-if game.PlaceId == 18517963950 and localPlayer.Name == _G.Main then
+if game.PlaceId == 18517963950 then
     task.spawn(function()
         local waitTime = _G.WaitTime or 60
         local startTime = tick()
-        print(string.format("[SERVER TIMER] Will find a new server if still here in %ds...", waitTime))
- 
+        --print(string.format("[SERVER TIMER] Will find a new server if still here in %ds...", waitTime))
+
         while tick() - startTime < waitTime do
             task.wait(1)
             if _G.Stop then
-                print("[SERVER TIMER] Cancelled (_G.Stop = true).")
+                --print("[SERVER TIMER] Cancelled (_G.Stop = true).")
                 return
             end
         end
- 
+
         if game.PlaceId == 18517963950 then
-            print(string.format("[SERVER TIMER] In same server for %ds — teleporting to a new server.", waitTime))
+            --print(string.format("[SERVER TIMER] In same server for %ds — teleporting to a new server.", waitTime))
             TeleportService:Teleport(18517963950, localPlayer)
         end
     end)
 end
- 
+
 local Players = game:GetService("Players")
 local localPlayer = Players.LocalPlayer
- 
- 
+
+
 if game.PlaceId == 18517967096 then
-    print("In game 18517967096")
- 
+    --print("In game 18517967096")
+
     if localPlayer.Name == _G.Main then
         task.spawn(function()
             local RunService = game:GetService("RunService")
             local VirtualInputManager = game:GetService("VirtualInputManager")
- 
+
             while not workspace:FindFirstChild("Map") do task.wait() end
             local map = workspace:WaitForChild("Map")
             local ballsFolder = map:WaitForChild("Balls")
- 
-            print("[BALL WALK] Camera-walk ball chase started (Main only)")
- 
+
+            --print("[BALL WALK] Camera-walk ball chase started (Main only)")
+
             local walkingToBall = false
             local lastPress = 0
- 
+
             local function holdingBall()
                 local folder = workspace:FindFirstChild(localPlayer.Name)
                 return folder and folder:FindFirstChild("Ball") ~= nil
             end
- 
+
             local function stopWalking()
                 if walkingToBall then
                     walkingToBall = false
@@ -494,29 +494,29 @@ if game.PlaceId == 18517967096 then
                     workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
                 end
             end
- 
+
             local conn
             conn = RunService.RenderStepped:Connect(function()
                 if _G.Stop then
                     stopWalking()
                     conn:Disconnect()
-                    print("[BALL WALK] Stopped (_G.Stop = true)")
+                    --print("[BALL WALK] Stopped (_G.Stop = true)")
                     return
                 end
- 
+
                 local character = localPlayer.Character
                 local rootPart = character and character:FindFirstChild("HumanoidRootPart")
                 if not rootPart then
                     stopWalking()
                     return
                 end
- 
+
                 -- already holding a ball → stop walking, let the shoot logic take over
                 if holdingBall() then
                     stopWalking()
                     return
                 end
- 
+
                 -- find the closest loose ball within 50 studs
                 local closestBall, closestDist = nil, 50
                 for _, ball in ipairs(ballsFolder:GetChildren()) do
@@ -528,25 +528,25 @@ if game.PlaceId == 18517967096 then
                         end
                     end
                 end
- 
+
                 if not closestBall then
                     stopWalking()
                     return
                 end
- 
+
                 local camera = workspace.CurrentCamera
                 local flatTarget = Vector3.new(closestBall.Position.X, rootPart.Position.Y, closestBall.Position.Z)
                 local flatDist = (flatTarget - rootPart.Position).Magnitude
- 
+
                 -- start walking if we aren't already
                 if not walkingToBall then
                     walkingToBall = true
                     camera.CameraType = Enum.CameraType.Scriptable
                     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
                     lastPress = tick()
-                    print("[BALL WALK] Walking to ball:", closestBall.Name)
+                    --print("[BALL WALK] Walking to ball:", closestBall.Name)
                 end
- 
+
                 -- keep camera behind the character, looking at the ball
                 if flatDist > 0.1 then
                     local dir = (flatTarget - rootPart.Position).Unit
@@ -555,7 +555,7 @@ if game.PlaceId == 18517967096 then
                         flatTarget
                     )
                 end
- 
+
                 -- 🔁 re-hold W every 0.25s so mouse clicks can't cancel the walk
                 if tick() - lastPress >= 0.25 then
                     lastPress = tick()
@@ -564,7 +564,7 @@ if game.PlaceId == 18517967096 then
             end)
         end)
     end
- 
+
     ------------------------------------------------------------
     -- Services & Locals
     ------------------------------------------------------------
@@ -575,18 +575,18 @@ if game.PlaceId == 18517967096 then
     local TweenService        = game:GetService("TweenService")
     local localPlayer         = Players.LocalPlayer
     local camera              = workspace.CurrentCamera
- 
+
     local actionRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Server"):WaitForChild("Action")
- 
+
     local checkInterval    = 0.25
     local hasBallLastFrame = false
- 
+
     -- Scoring config (donor script values) — hold times live in _G.Timings
     local DIST_SHOOTING2 = 15   -- 2-point shot distance (studs)
     local DIST_SHOOTING3 = 43   -- 3-point shot distance (studs)
     local SHOOTING3_WAIT = 0.8  -- stand still before the deep shot (seconds)
     local TWEEN_SPEED    = 40   -- studs/sec, Linear
- 
+
     ------------------------------------------------------------
     -- Utilities
     ------------------------------------------------------------
@@ -594,7 +594,7 @@ if game.PlaceId == 18517967096 then
         local folder = workspace:FindFirstChild(playerName)
         return folder and folder:FindFirstChild("Ball") ~= nil
     end
- 
+
     ------------------------------------------------------------
     -- 🚪 If Bot NEVER shows up in this server, wait 5s then return
     -- to lobby. But if Main and Bot were both here and the bot
@@ -605,42 +605,42 @@ if game.PlaceId == 18517967096 then
     if localPlayer.Name ~= _G.Bot then
         task.spawn(function()
             local TeleportService = game:GetService("TeleportService")
- 
+
             local function botInServer()
                 for _, p in ipairs(Players:GetPlayers()) do
                     if p.Name == _G.Bot then return true end
                 end
                 return false
             end
- 
+
             local botWasHere = false
- 
+
             while true do
                 task.wait(1)
- 
+
                 if botInServer() then
                     botWasHere = true
                 elseif botWasHere then
                     -- Bot was here with Main and left — do NOT make Main leave
-                    print("[MATCH] Bot left after being here — Main staying put.")
- 
+                    --print("[MATCH] Bot left after being here — Main staying put.")
+
                     -- ✅ Alt left on its timer → force Main's timings to 0.4 (green)
                     _G.Timings = {
                         Finishing = 0.4,
                         Shooting2 = 0.4,
                         Shooting3 = 0.4,
                     }
-                    print("[MATCH] Forced Main timings to 0.4 now that the alt is gone.")
+                    --print("[MATCH] Forced Main timings to 0.4 now that the alt is gone.")
                     break
                 else
                     -- Bot never arrived — give it 5s, then go back to lobby
-                    print("[MATCH] Bot never arrived — waiting 5s before returning to lobby...")
+                    --print("[MATCH] Bot never arrived — waiting 5s before returning to lobby...")
                     task.wait(5)
                     if botInServer() then
                         botWasHere = true
-                        print("[MATCH] Bot arrived — staying.")
+                        --print("[MATCH] Bot arrived — staying.")
                     else
-                        print("[MATCH] Bot still missing — teleporting back to lobby 18517963950.")
+                        --print("[MATCH] Bot still missing — teleporting back to lobby 18517963950.")
                         TeleportService:Teleport(18517963950, localPlayer)
                         break
                     end
@@ -648,31 +648,31 @@ if game.PlaceId == 18517967096 then
             end
         end)
     end
- 
+
     ------------------------------------------------------------
     -- 🤖 BOT: TP to bot spot and walk in place, staying put
     ------------------------------------------------------------
     if localPlayer.Name == _G.Bot then
         task.spawn(function()
             local botSpot = Vector3.new(-101, 70, 71)
- 
+
             -- initial teleport to the spot
             local char = localPlayer.Character or localPlayer.CharacterAdded:Wait()
             local rootPart = char:WaitForChild("HumanoidRootPart", 5)
             if rootPart then
                 rootPart.CFrame = CFrame.new(botSpot)
-                print("[BOT] Teleported to bot spot:", botSpot)
+                --print("[BOT] Teleported to bot spot:", botSpot)
             end
- 
+
             -- walk in place: tap W on repeat, snap back if it drifts
             while true do
                 task.wait(0.5)
                 if _G.Stop then
                     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
-                    print("[BOT] Walk-in-place stopped (_G.Stop = true)")
+                    --print("[BOT] Walk-in-place stopped (_G.Stop = true)")
                     break
                 end
- 
+
                 local c = localPlayer.Character
                 local rp = c and c:FindFirstChild("HumanoidRootPart")
                 if rp then
@@ -680,7 +680,7 @@ if game.PlaceId == 18517967096 then
                     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
                     task.wait(0.2)
                     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
- 
+
                     -- make sure the bot stays on the spot
                     if (rp.Position - botSpot).Magnitude > 2 then
                         rp.CFrame = CFrame.new(botSpot)
@@ -689,7 +689,7 @@ if game.PlaceId == 18517967096 then
             end
         end)
     end
- 
+
     ------------------------------------------------------------
     -- 🤖 BOT: Leave the match after _G.AltLeaveTime minutes
     ------------------------------------------------------------
@@ -698,7 +698,7 @@ if game.PlaceId == 18517967096 then
             local TeleportService = game:GetService("TeleportService")
             local minutes = _G.AltLeaveTime or 5
             local duration = minutes * 60
- 
+
             -- wait until the match has actually started before timing
             while true do
                 if _G.Stop then return end
@@ -707,20 +707,20 @@ if game.PlaceId == 18517967096 then
                 if court and court ~= "" then break end
                 task.wait(0.5)
             end
- 
+
             print(string.format("[BOT] Match started — leaving for lobby in %d min.", minutes))
- 
+
             local start = tick()
             while tick() - start < duration do
                 task.wait(1)
                 if _G.Stop then return end
             end
- 
+
             print("[BOT] Alt leave time reached — teleporting back to lobby.")
             TeleportService:Teleport(18517963950, localPlayer)
         end)
     end
- 
+
     ------------------------------------------------------------
     -- 🤖 BOT: Stuck safety — if the bot lands in the match place but
     -- never actually enters the game (no InGame attribute within 30s,
@@ -730,7 +730,7 @@ if game.PlaceId == 18517967096 then
         task.spawn(function()
             local TeleportService = game:GetService("TeleportService")
             local deadline = tick() + 30
- 
+
             while tick() < deadline do
                 task.wait(1)
                 if _G.Stop then return end
@@ -740,12 +740,12 @@ if game.PlaceId == 18517967096 then
                     return -- actually in the match, all good
                 end
             end
- 
+
             print("[BOT] Never entered the match after 30s — stuck, returning to lobby.")
             TeleportService:Teleport(18517963950, localPlayer)
         end)
     end
- 
+
     ------------------------------------------------------------
     -- ⏱️ Visual timer (bottom-left): countdown until the alt leaves
     -- Shown on both accounts; starts when the match starts.
@@ -753,14 +753,14 @@ if game.PlaceId == 18517967096 then
     task.spawn(function()
         local minutes = _G.AltLeaveTime or 5
         local duration = minutes * 60
- 
+
         local pg = localPlayer:WaitForChild("PlayerGui")
- 
+
         local gui = Instance.new("ScreenGui")
         gui.Name = "AltLeaveTimerGui"
         gui.ResetOnSpawn = false
         gui.Parent = pg
- 
+
         local label = Instance.new("TextLabel")
         label.Name = "TimerLabel"
         label.AnchorPoint = Vector2.new(0, 1)
@@ -774,11 +774,11 @@ if game.PlaceId == 18517967096 then
         label.TextSize = 18
         label.Text = "Alt leaves in: waiting…"
         label.Parent = gui
- 
+
         local corner = Instance.new("UICorner")
         corner.CornerRadius = UDim.new(0, 6)
         corner.Parent = label
- 
+
         -- wait for the match to actually start (InGame attribute)
         while true do
             if _G.Stop then
@@ -790,21 +790,21 @@ if game.PlaceId == 18517967096 then
             if court and court ~= "" then break end
             task.wait(0.5)
         end
- 
+
         local startT = tick()
         while true do
             if _G.Stop then
                 label.Text = "Alt timer stopped"
                 return
             end
- 
+
             -- if the alt already left, say so and stop counting
             if localPlayer.Name ~= _G.Bot and not Players:FindFirstChild(_G.Bot) then
                 label.Text = "Alt left ✔"
                 label.TextColor3 = Color3.fromRGB(120, 255, 120)
                 return
             end
- 
+
             local remaining = duration - (tick() - startT)
             if remaining <= 0 then
                 label.Text = "Alt leaving now…"
@@ -824,11 +824,11 @@ if game.PlaceId == 18517967096 then
             end
         end
     end)
- 
+
     ------------------------------------------------------------
     -- Scoring helpers (donor script)
     ------------------------------------------------------------
- 
+
     -- High-precision wait (Heartbeat-based, avoids task.wait jitter on the release)
     local function precise_wait(seconds)
         if not seconds or seconds <= 0 then return end
@@ -837,17 +837,17 @@ if game.PlaceId == 18517967096 then
             RunService.Heartbeat:Wait()
         end
     end
- 
+
     local function sprint(value)
         actionRemote:FireServer({ Sprinting = value, Type = "Sprint" })
     end
- 
+
     local function shoot(hold)
         actionRemote:FireServer({ Shoot = true, Type = "Shoot" })
         precise_wait(math.max(0, hold or 0.4))
         actionRemote:FireServer({ Shoot = false, Type = "Shoot" })
     end
- 
+
     -- Read a shot hold time from _G.Timings (live, so you can edit mid-session)
     local function get_timing(name, fallback)
         local t = _G.Timings
@@ -856,22 +856,22 @@ if game.PlaceId == 18517967096 then
         end
         return fallback or 0.4
     end
- 
+
     local function has_ball(char)
         return char:FindFirstChild("Ball") ~= nil
     end
- 
+
     local function move_to(char, point)
         if typeof(point) == "Instance" then
             point = point.Position
         end
         char:SetAttribute("MoveToPoint", point)
     end
- 
+
     local function move_cancel(char)
         char:SetAttribute("MoveToPoint", Vector3.zero)
     end
- 
+
     -- Wait until within maxDist studs of target (ignoring height), or timeout
     local function wait_until_near(rootPart, target, maxDist, timeout)
         local start = tick()
@@ -883,19 +883,19 @@ if game.PlaceId == 18517967096 then
             task.wait()
         end
     end
- 
+
     -- Tween to a spot `distance` studs out from the goal, facing it
     local function tween_position(rootPart, part, distance)
         local root_position = rootPart.Position
         local part_position = part.Position
- 
+
         local target_position = Vector3.new(part_position.X, root_position.Y, part_position.Z)
         local backward = -part.CFrame.LookVector
         local target_distance = -backward * distance
- 
+
         local distance_to_travel = (root_position - target_position).Magnitude
         local time = distance_to_travel / TWEEN_SPEED
- 
+
         local tween_info = TweenInfo.new(time, Enum.EasingStyle.Linear, Enum.EasingDirection.In)
         local tween = TweenService:Create(rootPart, tween_info, {
             CFrame = CFrame.lookAt(target_position + target_distance, target_position)
@@ -903,7 +903,7 @@ if game.PlaceId == 18517967096 then
         tween:Play()
         tween.Completed:Wait()
     end
- 
+
     -- Resolve the hoop goal for the court we're playing on
     local function get_goal(char)
         local courtName = char:GetAttribute("InGame")
@@ -915,7 +915,7 @@ if game.PlaceId == 18517967096 then
         local rim = hoop and hoop:FindFirstChild("Rim")
         return rim and rim:FindFirstChild("Goal")
     end
- 
+
     ------------------------------------------------------------
     -- Bot Teleport Logic
     ------------------------------------------------------------
@@ -924,7 +924,7 @@ if game.PlaceId == 18517967096 then
         task.wait(0.4)
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
     end
- 
+
     ------------------------------------------------------------
     -- BOT: E-press when it picks up the ball
     ------------------------------------------------------------
@@ -936,20 +936,20 @@ if game.PlaceId == 18517967096 then
                     print("Script stopped (_G.Stop = true)")
                     break
                 end
- 
+
                 local char = localPlayer.Character
                 local has = (char and has_ball(char)) or false
- 
+
                 if has and not hasBallLastFrame then
                     print("Bot picked up ball. Running teleport logic.")
                     botTeleportLogic()
                 end
- 
+
                 hasBallLastFrame = has
             end
         end)
     end
- 
+
     ------------------------------------------------------------
     -- MAIN: Scoring loop (donor logic)
     -- Priority if multiple are on: Finishing > Shooting3 > Shooting2
@@ -961,31 +961,31 @@ if game.PlaceId == 18517967096 then
                     print("[SCORING] Stopped (_G.Stop = true)")
                     break
                 end
- 
+
                 local finishing = _G.Finishing
                 local is3 = _G.Shooting3
                 local is2 = _G.Shooting2
                 if not (finishing or is2 or is3) then continue end
- 
+
                 local character = localPlayer.Character
                 if not character then continue end
                 local rootPart = character:FindFirstChild("HumanoidRootPart")
                 if not rootPart then continue end
- 
+
                 local goal = get_goal(character)
                 if not goal then continue end
- 
+
                 -- No ball: the camera-walk ball chase handles getting one
                 if not has_ball(character) then continue end
- 
+
                 -- Already mid-shot: wait
                 if character:GetAttribute("Action") == "Shooting" then continue end
- 
+
                 if finishing then
                     -- FINISHING: sprint + hold forward toward the hoop, no pre-steps
                     sprint(true)
                     move_to(character, goal)
- 
+
                     -- Keep forward held toward the hoop during the approach
                     local conn
                     conn = RunService.RenderStepped:Connect(function()
@@ -996,11 +996,11 @@ if game.PlaceId == 18517967096 then
                             localPlayer:Move(Vector3.zero)
                         end
                     end)
- 
+
                     -- Wait until close enough to register a layup, then shoot while still sprinting
                     wait_until_near(rootPart, goal, 3, 2) -- within ~3 studs or up to 2s
                     shoot(get_timing("Finishing", 0.4))
- 
+
                     -- Cleanup: release forward, stop sprinting, cancel movement
                     if conn then conn:Disconnect() end
                     localPlayer:Move(Vector3.zero)
@@ -1017,7 +1017,10 @@ if game.PlaceId == 18517967096 then
             end
         end)
     end
- 
+
+    while true do
+        task.wait() game.GuiService:ClearError()
+    end
     ------------------------------------------------------------
     -- (Removed) Debug Multi-ball Teleport — replaced by the
     -- camera-walk ball chase above so nothing teleports to balls.
