@@ -4,7 +4,7 @@
 
 -- Alt leave timer (minutes). Allowed values: 2..10 (2, 3, 4, 5, 6, 7, 8, 9, 10)
 -- This controls how long the ALT stays in a game before returning to Lobby.
-local ALT_LEAVE_TIMER = 4.5 -- minutes
+local ALT_LEAVE_TIMER = 5 -- minutes
 
 -- Derived duration in seconds used by the in-game loop for the ALT
 local GAME_DURATION = ALT_LEAVE_TIMER * 60
@@ -23,7 +23,7 @@ end)
 
 -- Multi-mode controller: optionally chain two modes with a timer for the first phase
 local MULTI_MODE = {
-    ENABLED = false;     -- set true to activate multi-mode sequencing
+    ENABLED = true;     -- set true to activate multi-mode sequencing
     PRESET = 4;          -- 1..5 (see MULTI_MODE_PRESETS below)
     FIRST_PHASE_MINUTES = 6; -- how long to run the first mode before switching (timer presets)
     FINISHING_REPS = 5;  -- used by preset 5: number of FINISHING reps before switching
@@ -49,8 +49,8 @@ local MULTI_MODE_STATE = {
 
 -- Account slot picker: set build slots/usernames here for easy access
 local MAIN_ACCOUNT_DATA = {
-    BUILD_SLOT = 1;
-    USER_NAME = `stealinsh`;
+    BUILD_SLOT = 3;
+    USER_NAME = `KatanaVll`;
 }
 
 local ALT_ACCOUNT_DATA = {
