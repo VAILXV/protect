@@ -91,9 +91,9 @@ if game.PlaceId == 18517963950 then
     --// Settings
     local CHECK_INTERVAL = 2
     local FOLLOW_PLACE_ID = 18517963950
-    local TARGET_PLAYER_COUNT = 4
-    local MIN_PLAYERS = 4
-    local MAX_PLAYERS = 15
+    local TARGET_PLAYER_COUNT = 10
+    local MIN_PLAYERS = 15
+    local MAX_PLAYERS = 20
     local PLACE_ID = game.PlaceId
     local teleportPosition = Vector3.new(-176, 32, 49) -- fallback only (used if Spots.1v1 is missing)
 
