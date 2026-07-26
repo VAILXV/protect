@@ -24,7 +24,7 @@ end)
 -- Multi-mode controller: optionally chain two modes with a timer for the first phase
 local MULTI_MODE = {
     ENABLED = true;     -- set true to activate multi-mode sequencing
-    PRESET = 4;          -- 1..5 (see MULTI_MODE_PRESETS below)
+    PRESET = 3;          -- 1..5 (see MULTI_MODE_PRESETS below)
     FIRST_PHASE_MINUTES = 3; -- how long to run the first mode before switching (timer presets)
     FINISHING_REPS = 5;  -- used by preset 5: number of FINISHING reps before switching
 }
@@ -49,8 +49,8 @@ local MULTI_MODE_STATE = {
 
 -- Account slot picker: set build slots/usernames here for easy access
 local MAIN_ACCOUNT_DATA = {
-    BUILD_SLOT = 3;
-    USER_NAME = `KatanaVll`;
+    BUILD_SLOT = 5;
+    USER_NAME = `fwlm`;
 }
 
 local ALT_ACCOUNT_DATA = {
@@ -61,10 +61,10 @@ local ALT_ACCOUNT_DATA = {
 -- Centralized behavior config so you only edit here
 local CONFIG = {
     -- MODE options: `FINISHING` | `DEFENDING` | `SHOOTING2` (mid/2s) | `SHOOTING3` (3s) | `PLAYMAKING`
-    MODE = `SHOOTING2`;
+    MODE = `FINISHING`;
 
     -- TIMING behavior: true for good timing (~0.4s), false to intentionally mistime (early or late)
-    TIMING = false; -- true = green timing, false = mistime
+    TIMING = true; -- true = green timing, false = mistime
 
     -- When TIMING=false, choose mistime flavor: `early` (release instantly) or `late` (hold long)
     MISTIME = `early`;
