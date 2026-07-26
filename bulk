@@ -1,4 +1,18 @@
 ---------------------------------------------------------------------
+-- 🧯 Auto-clear stuck error prompts (e.g. "Teleport restricted") so
+-- the client never freezes behind an error dialog
+---------------------------------------------------------------------
+task.spawn(function()
+    local GuiService = game:GetService("GuiService")
+    while true do
+        task.wait(1)
+        pcall(function()
+            GuiService:ClearError()
+        end)
+    end
+end)
+
+---------------------------------------------------------------------
 -- 🧹 Locally remove every player's character except Main / Bot / self
 -- (client-side only — they still exist on the server)
 ---------------------------------------------------------------------
@@ -77,9 +91,9 @@ if game.PlaceId == 18517963950 then
     --// Settings
     local CHECK_INTERVAL = 2
     local FOLLOW_PLACE_ID = 18517963950
-    local TARGET_PLAYER_COUNT = 10
-    local MIN_PLAYERS = 15
-    local MAX_PLAYERS = 20
+    local TARGET_PLAYER_COUNT = 4
+    local MIN_PLAYERS = 4
+    local MAX_PLAYERS = 15
     local PLACE_ID = game.PlaceId
     local teleportPosition = Vector3.new(-176, 32, 49) -- fallback only (used if Spots.1v1 is missing)
 
@@ -174,6 +188,11 @@ if game.PlaceId == 18517963950 then
     -- stack up and keep firing teleports after Main was already found)
     local followRunning = false
 
+    -- After leaving a match early, wait this long before chasing Main again
+    -- (Main is still IN the match — following it there just triggers the
+    -- "Teleport restricted" prompt and freezes the bot)
+    local FOLLOW_COOLDOWN = 90 -- seconds
+
     -- Should the bot actually try to follow right now?
     local function botShouldFollow()
         -- Main is already in this server → nothing to follow
@@ -185,6 +204,16 @@ if game.PlaceId == 18517963950 then
         local char = localPlayer.Character
         if char and char:GetAttribute("InQueue") then return false end
 
+        -- We just left a match on the alt timer → Main is still playing and
+        -- can't be followed yet. Wait out the cooldown before chasing.
+        local leftAt = 0
+        pcall(function()
+            leftAt = tonumber(TeleportService:GetTeleportSetting("BotLeftMatchAt")) or 0
+        end)
+        if leftAt > 0 and (os.time() - leftAt) < FOLLOW_COOLDOWN then
+            return false
+        end
+
         return true
     end
 
@@ -192,11 +221,11 @@ if game.PlaceId == 18517963950 then
         if localPlayer.Name ~= _G.Bot then return end
         if followRunning then return end
         followRunning = true
-        --print("[BOT] followMainPlayer started.")
+        print("[BOT] followMainPlayer started.")
 
         while task.wait(CHECK_INTERVAL) do
             if game.PlaceId ~= FOLLOW_PLACE_ID then
-                --print("[BOT] Not in follow place ID yet.")
+                print("[BOT] Not in follow place ID yet.")
                 continue
             end
 
@@ -213,7 +242,7 @@ if game.PlaceId == 18517963950 then
                     { FriendUser = _G.Main, Type = "TeleportToPlayer" }
                 }
                 friendsRemote:FireServer(unpack(args))
-                --print("[BOT] Attempting to follow " .. _G.Main)
+                print("[BOT] Attempting to follow " .. _G.Main)
             else
                 warn("[BOT] Friends remote missing or nil.")
             end
@@ -424,7 +453,12 @@ if game.PlaceId == 18517963950 then
         task.spawn(function()
             while true do
                 task.wait(1)
-                if botShouldFollow() and not followRunning then
+                if isPlayerInServer(_G.Main) then
+                    -- reunited with Main → clear the left-match cooldown
+                    pcall(function()
+                        TeleportService:SetTeleportSetting("BotLeftMatchAt", 0)
+                    end)
+                elseif botShouldFollow() and not followRunning then
                     print("[BOT] Main not found — trying follow...")
                     task.spawn(followMainPlayer)
                 end
@@ -587,6 +621,13 @@ if game.PlaceId == 18517967096 then
     local SHOOTING3_WAIT = 0.8  -- stand still before the deep shot (seconds)
     local TWEEN_SPEED    = 40   -- studs/sec, Linear
 
+    -- Playmaking config
+    local DIST_PLAYMAKING    = 25   -- spacing distance from goal (studs)
+    local DRIBBLE_RATE       = 0.03 -- seconds between H presses
+    local SPAM_WINDOW        = 7.0  -- seconds to spam dribbles
+    local BREAK_WINDOW       = 4.0  -- seconds to rest between spam windows
+    local ALT_REACH_DISTANCE = 22    -- bot hover distance from goal in reach mode
+
     ------------------------------------------------------------
     -- Utilities
     ------------------------------------------------------------
@@ -673,6 +714,9 @@ if game.PlaceId == 18517967096 then
                     break
                 end
 
+                -- reach mode controls the bot's position — don't pin it here
+                if _G.PlaymakingAlt then continue end
+
                 local c = localPlayer.Character
                 local rp = c and c:FindFirstChild("HumanoidRootPart")
                 if rp then
@@ -716,6 +760,12 @@ if game.PlaceId == 18517967096 then
                 if _G.Stop then return end
             end
 
+            -- remember we left mid-game so the lobby script won't chase Main
+            -- into the match (avoids the "Teleport restricted" freeze)
+            pcall(function()
+                TeleportService:SetTeleportSetting("BotLeftMatchAt", os.time())
+            end)
+
             print("[BOT] Alt leave time reached — teleporting back to lobby.")
             TeleportService:Teleport(18517963950, localPlayer)
         end)
@@ -740,6 +790,12 @@ if game.PlaceId == 18517967096 then
                     return -- actually in the match, all good
                 end
             end
+
+            -- Main is still mid-game here too — set the cooldown so the
+            -- lobby script doesn't immediately chase Main back into it
+            pcall(function()
+                TeleportService:SetTeleportSetting("BotLeftMatchAt", os.time())
+            end)
 
             print("[BOT] Never entered the match after 30s — stuck, returning to lobby.")
             TeleportService:Teleport(18517963950, localPlayer)
@@ -962,6 +1018,9 @@ if game.PlaceId == 18517967096 then
                     break
                 end
 
+                -- Playmaking mode takes over — skip the shot logic entirely
+                if _G.Playmaking then continue end
+
                 local finishing = _G.Finishing
                 local is3 = _G.Shooting3
                 local is2 = _G.Shooting2
@@ -1018,9 +1077,147 @@ if game.PlaceId == 18517967096 then
         end)
     end
 
-    while true do
-        task.wait() game.GuiService:ClearError()
+    ------------------------------------------------------------
+    -- MAIN: Playmaking (_G.Playmaking) — tween to spacing, then
+    -- spam H dribbles in cycles (7s on / 4s off)
+    ------------------------------------------------------------
+    if localPlayer.Name == _G.Main then
+        task.spawn(function()
+            while task.wait() do
+                if _G.Stop then
+                    print("[PLAYMAKING] Stopped (_G.Stop = true)")
+                    break
+                end
+                if not _G.Playmaking then continue end
+
+                local character = localPlayer.Character
+                if not character then continue end
+                local rootPart = character:FindFirstChild("HumanoidRootPart")
+                if not rootPart then continue end
+
+                local goal = get_goal(character)
+                if not goal then continue end
+
+                -- No ball: the camera-walk ball chase handles getting one
+                if not has_ball(character) then continue end
+
+                -- Already mid-shot: wait
+                if character:GetAttribute("Action") == "Shooting" then continue end
+
+                -- Tween to spacing distance from goal
+                tween_position(rootPart, goal, DIST_PLAYMAKING)
+
+                -- Spam dribbles: 7s on, 4s off (repeat until mode off / ball lost)
+                while _G.Playmaking and not _G.Stop and has_ball(character)
+                    and character:GetAttribute("Action") ~= "Shooting" do
+
+                    -- Spam window
+                    local spamStart = os.clock()
+                    while _G.Playmaking and not _G.Stop and has_ball(character)
+                        and ((os.clock() - spamStart) < SPAM_WINDOW) do
+                        local act = character:GetAttribute("Action")
+                        if act ~= "Shooting" then
+                            actionRemote:FireServer({ Keys = "H", Type = "Dribble" })
+                        end
+                        task.wait(DRIBBLE_RATE)
+                    end
+
+                    -- Break window
+                    local breakStart = os.clock()
+                    while _G.Playmaking and not _G.Stop and has_ball(character)
+                        and ((os.clock() - breakStart) < BREAK_WINDOW) do
+                        task.wait(0.1)
+                    end
+                end
+            end
+        end)
     end
+
+    ------------------------------------------------------------
+    -- BOT: Playmaking reach (_G.PlaymakingAlt) — hover near the
+    -- goal and spam Reach so dribble moves register
+    ------------------------------------------------------------
+    if localPlayer.Name == _G.Bot then
+        task.spawn(function()
+            while task.wait() do
+                if _G.Stop then
+                    print("[PLAYMAKING ALT] Stopped (_G.Stop = true)")
+                    break
+                end
+                if not _G.PlaymakingAlt then continue end
+
+                local character = localPlayer.Character
+                if not character then continue end
+                local rootPart = character:FindFirstChild("HumanoidRootPart")
+                if not rootPart then continue end
+
+                local goal = get_goal(character)
+                if not goal then continue end
+
+                -- Hover near the goal for positioning
+                tween_position(rootPart, goal, ALT_REACH_DISTANCE)
+
+                -- Send reach immediately (no sync gating)
+                actionRemote:FireServer({
+                    Action = "Reach",
+                    Reach = true
+                })
+                task.wait(0.2)
+            end
+        end)
+    end
+
+    ------------------------------------------------------------
+    -- 🔀 MULTI MODE (_G.MultiMode): Playmaking for
+    -- _G.MultiModeTime minutes, then switch to Finishing
+    ------------------------------------------------------------
+    if _G.MultiMode then
+        task.spawn(function()
+            local minutes = _G.MultiModeTime or 3
+            local duration = minutes * 60
+
+            -- wait for the match to actually start
+            while true do
+                if _G.Stop then return end
+                local char = localPlayer.Character
+                local court = char and char:GetAttribute("InGame")
+                if court and court ~= "" then break end
+                task.wait(0.5)
+            end
+
+            -- Phase 1: Playmaking
+            if localPlayer.Name == _G.Main then
+                _G.Playmaking = true
+                _G.Finishing  = false
+                _G.Shooting2  = false
+                _G.Shooting3  = false
+                print(string.format("[MULTI MODE] Phase 1: Playmaking for %d min.", minutes))
+            elseif localPlayer.Name == _G.Bot then
+                _G.PlaymakingAlt = true
+                print("[MULTI MODE] Bot reach mode ON for phase 1.")
+            end
+
+            -- run phase 1 for the configured time
+            local start = tick()
+            while tick() - start < duration do
+                task.wait(1)
+                if _G.Stop then return end
+            end
+
+            -- Phase 2: Finishing
+            if localPlayer.Name == _G.Main then
+                _G.Playmaking = false
+                _G.Finishing  = true
+                _G.Shooting2  = false
+                _G.Shooting3  = false
+                print("[MULTI MODE] Phase 2: switched to Finishing.")
+            elseif localPlayer.Name == _G.Bot then
+                _G.PlaymakingAlt = false
+                print("[MULTI MODE] Bot reach mode OFF — back to spot for phase 2.")
+            end
+        end)
+    end
+
     ------------------------------------------------------------
     -- (Removed) Debug Multi-ball Teleport — replaced by the
     -- camera-walk ball chase above so nothing teleports to balls.
