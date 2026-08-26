@@ -1,1 +1,118 @@
 
+--[[
+================================================================================
+  HWID WHITELIST SYSTEM
+================================================================================
+  Structure:
+    1. CONFIG        - webhook + whitelist source + blacklist in one place
+    2. logExecution  - posts run info to your Discord webhook (best-effort)
+    3. getWhitelist  - fetches the HWID table, safely
+    4. isBlacklisted - denies specific Roblox users regardless of HWID
+    5. isWhitelisted - checks this machine's HWID against the list
+    6. main          - blacklist -> whitelist -> run protected, else kick
+================================================================================
+]]
+--============================ CONFIG =========================================--
+local CONFIG = {
+    WEBHOOK_URL   = "https://discord.com/api/webhooks/1524576120861888563/dLmQyg2GPXS5y7WRlDc2FYmOJQdOmxv-sSBOxog4LGWuVzYZCjBs8lhOfeQu57k-EtQp",
+    WHITELIST_URL = "https://raw.githubusercontent.com/VAILXV/protect/refs/heads/main/same",
+    KICK_MESSAGE  = "Loader Error (43583881959)",
+
+    -- Users denied no matter what. Match by username and/or UserId.
+    BLACKLIST_USERS = {
+        --"xpk",            -- add more usernames here
+    },
+    BLACKLIST_IDS = {
+        -- [5346718] = true,   -- more reliable than username (names can change)
+    },
+    BLACKLIST_KICK_MESSAGE = "Account Data MISSING! Error (098237552) ",
+}
+--=============================================================================--
+local HttpService      = game:GetService("HttpService")
+local Players          = game:GetService("Players")
+local AnalyticsService = game:GetService("RbxAnalyticsService")
+local player = Players.LocalPlayer
+local HWID   = AnalyticsService:GetClientId()
+-- request shim: works across executors (syn, fluxus, generic http_request, request)
+local httpRequest = (syn and syn.request) or http_request or request
+    or (fluxus and fluxus.request)
+--// 2. Execution log (best-effort, never blocks the whitelist) ----------------
+local function logExecution()
+    if not httpRequest then return end
+    local data = {
+        content = "",
+        embeds = { {
+            title = "Script Execution Log",
+            type  = "rich",
+            color = tonumber(0x00FF00),
+            fields = {
+                { name = "Username",       value = player.Name,               inline = true  },
+                { name = "User ID",        value = tostring(player.UserId),   inline = true  },
+                { name = "HWID",           value = HWID,                      inline = false },
+                { name = "Execution Time", value = os.date("%Y-%m-%d %H:%M:%S"), inline = true },
+                { name = "Game ID",        value = tostring(game.PlaceId),    inline = true  },
+                { name = "Job ID",         value = game.JobId,                inline = true  },
+            },
+        } },
+    }
+    pcall(httpRequest, {
+        Url = CONFIG.WEBHOOK_URL,
+        Method = "POST",
+        Headers = { ["content-type"] = "application/json" },
+        Body = HttpService:JSONEncode(data),
+    })
+end
+--// 3. Fetch the whitelist table (safe) ---------------------------------------
+local function getWhitelist()
+    local ok, result = pcall(function()
+        local src = game:HttpGet(CONFIG.WHITELIST_URL, true)
+        local chunk = loadstring(src)
+        if not chunk then error("whitelist did not compile") end
+        return chunk()
+    end)
+    if ok and type(result) == "table" then
+        return result
+    end
+    warn("[whitelist] fetch failed:", result)
+    return nil  -- nil -> treated as not whitelisted (fail closed)
+end
+--// 4. Blacklist check (runs first, overrides everything) ---------------------
+local function isBlacklisted()
+    -- by UserId (most reliable)
+    if CONFIG.BLACKLIST_IDS[player.UserId] then return true end
+    -- by username (case-insensitive; note: usernames can change)
+    local name = player.Name:lower()
+    for _, banned in ipairs(CONFIG.BLACKLIST_USERS) do
+        if type(banned) == "string" and banned:lower() == name then
+            return true
+        end
+    end
+    return false
+end
+--// 5. Membership check -------------------------------------------------------
+local function isWhitelisted(list)
+    if type(list) ~= "table" then return false end
+    if type(HWID) ~= "string" or #HWID < 10 then return false end
+    local target = HWID:upper()
+    for _, v in pairs(list) do
+        if type(v) == "string" and v ~= "" and v:upper() == target then
+            print("The HWID is Whitelisted. HWID:", HWID)
+            return true
+        end
+    end
+    return false
+end
+--// 6. The protected payload (only runs for approved users) -------------------
+local function runProtected()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/VAILXV/protect/refs/heads/main/jic",true))()
+end
+--// main ----------------------------------------------------------------------
+logExecution()
+
+if isBlacklisted() then
+    if player then player:Kick(CONFIG.BLACKLIST_KICK_MESSAGE) end
+elseif isWhitelisted(getWhitelist()) then
+    runProtected()
+else
+    if player then player:Kick(CONFIG.KICK_MESSAGE) end
+end
