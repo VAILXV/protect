@@ -382,13 +382,13 @@ if game.PlaceId == 14269621394 then
     --  and spams the remote it learned once AutoDefensive is on.
     ------------------------------------------------------------------
 
-    local STEAL_INTERVAL = 0.5      -- 0.01 was 100 fires/sec into a cooldown:
+    local STEAL_INTERVAL = 0.01      -- 0.01 was 100 fires/sec into a cooldown:
                                     -- not a faster steal, just a throttled flood
     local STEAL_MARKER   = "Steal"  -- arg 2 on a steal; this is what the hook matches
     local TARGET_MODE    = "SELF"   -- "SELF" | "CLOSEST" | "NAME"
     local TARGET_NAME    = ""       -- only for "NAME"
     local TARGET_RANGE   = 50       -- only for "CLOSEST"; math.huge to ignore distance
-    local DEFENDING_CAP  = 1300     -- auto-off at this much Defending XP; 0 disables
+    local DEFENDING_CAP  = 870     -- auto-off at this much Defending XP; 0 disables
     local PRINT_DEBUG    = true
 
     local function dprint(...)
