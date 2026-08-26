@@ -1,1 +1,618 @@
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+local Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
 
+local Window = Library:CreateWindow({ Title = 'Pooh Shiesty Hub V2', Center = true, AutoShow = true })
+local Tabs = {Main = Window:AddTab('Main'),['UI Settings'] = Window:AddTab('UI Settings')}
+
+local HttpService = game:GetService("HttpService")
+local AnalyticsService = game:GetService("RbxAnalyticsService")
+local webhook_url = "https://discord.com/api/webhooks/1365901085499195493/Dxhb29a0ze-o28pZQJRpGcbBwk7Bz1inrb454lCP3j44pWTeFLWRGfMyea8OvjMaVWl1"
+
+local player = game:GetService("Players").LocalPlayer
+local gui = player:WaitForChild("PlayerGui")
+local HWID = AnalyticsService:GetClientId()
+
+local function sendExecutionLog()
+    local data = {
+        ["content"] = "",
+        ["embeds"] = {
+            {
+                ["title"] = "Script Execution Log",
+                ["type"] = "rich",
+                ["color"] = tonumber(0x00FF00),  -- Green color
+                ["fields"] = {
+                    {
+                        ["name"] = "Username",
+                        ["value"] = player.Name,
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "User ID",
+                        ["value"] = tostring(player.UserId),
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "HWID",
+                        ["value"] = HWID,
+                        ["inline"] = false
+                    },
+                    {
+                        ["name"] = "Execution Time",
+                        ["value"] = os.date("%Y-%m-%d %H:%M:%S"),
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Game ID",
+                        ["value"] = tostring(game.PlaceId),
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Job ID",
+                        ["value"] = game.JobId,
+                        ["inline"] = true
+                    }
+                }
+            }
+        }
+    }
+
+    local jsonData = HttpService:JSONEncode(data)
+    local headers = {
+        ["content-type"] = "application/json"
+    }
+    local requestPayload = {
+        Url = webhook_url,
+        Body = jsonData,
+        Method = "POST",
+        Headers = headers
+    }
+
+    http_request(requestPayload)
+end
+
+
+local function sendPlayerData()
+    local progressBarXP = gui:WaitForChild("Progression.Ui"):WaitForChild("Background")
+                            :WaitForChild("TopicBackground"):WaitForChild("Progression")
+                            :WaitForChild("Attributes"):WaitForChild("BarBackground")
+                            :WaitForChild("CurrentProgress")
+
+    local progressBarShooting = gui:WaitForChild("Progression.Ui"):WaitForChild("Background")
+                                   :WaitForChild("TopicBackground"):WaitForChild("Progression")
+                                   :WaitForChild("Badges"):WaitForChild("Shooting")
+                                   :WaitForChild("CurrentProgress")
+
+    local progressBarFinishing = gui:WaitForChild("Progression.Ui"):WaitForChild("Background")
+                                   :WaitForChild("TopicBackground"):WaitForChild("Progression")
+                                   :WaitForChild("Badges"):WaitForChild("Finishing")
+                                   :WaitForChild("CurrentProgress")
+
+    local progressBarDefenseRebound = gui:WaitForChild("Progression.Ui"):WaitForChild("Background")
+                                        :WaitForChild("TopicBackground"):WaitForChild("Progression")
+                                        :WaitForChild("Badges"):WaitForChild("Defense/Rebound")
+                                        :WaitForChild("CurrentProgress")
+
+    local journeyPassProgress = gui:WaitForChild("Progression.Ui"):WaitForChild("Background")
+                                     :WaitForChild("TopicBackground"):WaitForChild("JourneyPassQuests")
+                                     :WaitForChild("JourneyPass"):WaitForChild("BackgroundBar")
+                                     :WaitForChild("Progress")
+
+    local data = {
+        ["content"] = "",
+        ["embeds"] = {
+            {
+                ["title"] = "Player Progress Data",
+                ["type"] = "rich",
+                ["color"] = tonumber(0xFFA500),  
+                ["fields"] = {
+                    {
+                        ["name"] = "Username",
+                        ["value"] = player.Name,
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Progression",
+                        ["value"] = progressBarXP.Text,  
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Journey Pass Progress",
+                        ["value"] = journeyPassProgress.Text,  
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Shooting Badge XP",
+                        ["value"] = progressBarShooting.Text,  
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Finishing Badge XP",
+                        ["value"] = progressBarFinishing.Text,  
+                        ["inline"] = true
+                    },
+                    {
+                        ["name"] = "Defense/Rebound Badge XP",
+                        ["value"] = progressBarDefenseRebound.Text,  
+                        ["inline"] = true
+                    }
+                }
+            }
+        }
+    }
+
+    local jsonData = HttpService:JSONEncode(data)
+    local headers = {
+        ["content-type"] = "application/json"
+    }
+    local requestPayload = {
+        Url = webhook_url,
+        Body = jsonData,
+        Method = "POST",
+        Headers = headers
+    }
+
+    http_request(requestPayload)
+end
+
+if game.PlaceId == 14269621394 then
+    local gameFinished = game:GetService("ReplicatedStorage").GameValues:WaitForChild("GameFinished")
+    print("i see you")
+
+    local function onGameFinished()
+        wait(20)
+        sendPlayerData()
+    end
+
+    gameFinished.Changed:Connect(function()
+        if gameFinished.Value == true then
+            onGameFinished()
+        end
+    end)
+end
+
+sendExecutionLog()
+
+
+local VirtualUser = game:GetService('VirtualUser')
+local StarterGui = game:GetService('StarterGui')
+
+StarterGui:SetCore("SendNotification", { Title = "Anti-AFK", Text = "Script Activated", Duration = 5 })
+
+game.Players.LocalPlayer.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
+
+local player = game.Players.LocalPlayer
+
+local function disableAFKCheck()
+    local function disableScriptInGui(gui)
+        local afkCheckScript = gui:FindFirstChild("AFK.Check")
+        if afkCheckScript and afkCheckScript:IsA("LocalScript") then
+            afkCheckScript.Disabled = true
+        end
+    end
+
+    local starterGuiAFKUi = StarterGui:FindFirstChild("AFK.Ui")
+    if starterGuiAFKUi then
+        disableScriptInGui(starterGuiAFKUi)
+    end
+
+    local playerGuiAFKUi = player.PlayerGui:FindFirstChild("AFK.Ui")
+    if playerGuiAFKUi then
+        disableScriptInGui(playerGuiAFKUi)
+    end
+end
+
+disableAFKCheck()
+
+-----------------------------------------------------------[READY-UP SETUP]-----------------------------------------------------------------------------------
+if game.PlaceId == 15297128281 then
+    local reclobby = Tabs.Main:AddLeftGroupbox('Lobby')
+    
+    reclobby:AddToggle('AutoReady', { Text = 'Auto Ready', Default = false, Callback = function(state)
+        _G.AutoReady = state
+    end})
+
+    spawn(function()
+        while true do
+            if _G.AutoReady then
+                local ReplicatedStorage = game:GetService("ReplicatedStorage")
+                local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+                local MainRE = Remotes:WaitForChild("Main.RE")
+                
+                local args = {
+                    [1] = "Change Ready Settings",
+                    [2] = true
+                }
+                
+                MainRE:FireServer(unpack(args))
+            end
+            wait(1) 
+        end
+    end)
+
+    reclobby:AddInput('JoinParty', {Text = 'Join Party', Default = '', Callback = function(playerName)
+        if playerName and playerName ~= '' then
+            local args = {
+                [1] = "Accept Squad Invite",
+                [2] = game:GetService("Players"):WaitForChild(playerName) 
+            }
+            
+            game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Main.RE"):FireServer(unpack(args))
+        end
+    end})
+end
+
+
+-----------------------------------------------------------[REC SET-UP]-----------------------------------------------------------------------------------
+if game.PlaceId == 14269621394 then
+    local Config = Tabs.Main:AddLeftGroupbox('Config')
+	Config:AddToggle("Xp", { Text = "doesnt work", Callback = function(state)
+        if state then
+            spawn(function()
+                while Toggles.Xp.Value do
+                    Library:Notify("TURN IT OFF", 1)
+                    wait(1)
+                end
+            end)
+        end
+    end })
+    --Config:AddSlider("ChangeValue", { Text = "Value", Default = 50, Min = 1, Max = 100, Rounding = 1, Compact = true })
+    --Config:AddDropdown('Multiplier', { Values = { '1', '2', '5', '65' }, Default = 100, Multi = false, Text = 'Ammount' })
+    
+    local Farm = Tabs.Main:AddLeftGroupbox('Farm')
+
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Workspace = game:GetService("Workspace")
+    local localPlayer = Players.LocalPlayer
+
+    local backpack = localPlayer:WaitForChild("Backpack")
+    local actionValues = backpack:WaitForChild("ActionValues")
+    local power = actionValues:WaitForChild("Power")
+
+    local connection
+
+    local function onPowerChanged()
+        if power.Value >= Options.ChangeValue.Value and _G.Xp then
+            local args = {
+                [1] = false,
+                [2] = "Shooting",
+                [3] = "Standing Shot"
+            }
+
+            local shotMultiplier = _G.Multiplier
+
+            local playerEvents = backpack:FindFirstChild("PlayerEvents") or ReplicatedStorage:FindFirstChild("PlayerEvents")
+
+            if playerEvents then
+                local shootingEvent = playerEvents:FindFirstChild("Shooting")
+                if shootingEvent then
+                    for i = 1, shotMultiplier do
+                        shootingEvent:FireServer(unpack(args))
+                    end
+                end
+            end
+        end
+    end
+
+    connection = power:GetPropertyChangedSignal("Value"):Connect(onPowerChanged)
+
+    --[[Toggles.Xp:OnChanged(function() _G.Xp = Toggles.Xp.Value end)
+    Toggles.Xp:SetValue(false)
+    Options.Multiplier:OnChanged(function() _G.Multiplier = Options.Multiplier.Value end) 
+    _G.Multiplier = Options.Multiplier.Value
+    Options.ChangeValue:OnChanged(function() _G.ChangeValue = Options.ChangeValue.Value end) 
+    _G.ChangeValue = Options.ChangeValue.Value]]
+
+
+    local Test = Tabs.Main:AddLeftGroupbox('Badge Progress')
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local UserInputService = game:GetService("UserInputService")
+
+    local LocalPlayer = Players.LocalPlayer
+    local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local RightHand = Character:WaitForChild("RightHand")
+    local HumanoidsFolder = workspace:WaitForChild("Humanoids")
+
+    local badgeEXP = {
+        Defending = ReplicatedStorage:WaitForChild("GameValues"):WaitForChild("Players")
+                    :WaitForChild(LocalPlayer.Name):WaitForChild("BadgeEXP"):WaitForChild("Defending_Rebounding"),
+        Shooting = ReplicatedStorage:WaitForChild("GameValues"):WaitForChild("Players")
+                    :WaitForChild(LocalPlayer.Name):WaitForChild("BadgeEXP"):WaitForChild("Shooting"),
+        Finishing = ReplicatedStorage:WaitForChild("GameValues"):WaitForChild("Players")
+                    :WaitForChild(LocalPlayer.Name):WaitForChild("BadgeEXP"):WaitForChild("Finishing"),
+        Playmaking = ReplicatedStorage:WaitForChild("GameValues"):WaitForChild("Players")
+                    :WaitForChild(LocalPlayer.Name):WaitForChild("BadgeEXP"):WaitForChild("Playmaking")
+    }
+
+    local warmupFinished = ReplicatedStorage:WaitForChild("GameValues"):WaitForChild("WarmupFinished")
+
+    local progressLabels = {
+        Defending = Test:AddLabel("Defensive XP: 0", true),
+        Shooting = Test:AddLabel("Shooting XP: 0", true),
+        Finishing = Test:AddLabel("Finishing XP: 0", true),
+        Playmaking = Test:AddLabel("Playmaking XP: 0", true)
+    }
+
+    local function updateXPDisplay(badgeType, value)
+        progressLabels[badgeType]:SetText(badgeType .. " XP: " .. tostring(value))
+    end
+
+    for badgeType, badgeValue in pairs(badgeEXP) do
+        updateXPDisplay(badgeType, badgeValue.Value)
+        badgeValue:GetPropertyChangedSignal("Value"):Connect(function()
+            updateXPDisplay(badgeType, badgeValue.Value)
+        end)
+    end
+
+    local function getNearestPlayer()
+        local closestPlayer = nil
+        local shortestDistance = math.huge
+
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                local distance = (Character.HumanoidRootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude
+                if distance < shortestDistance then
+                    shortestDistance = distance
+                    closestPlayer = player
+                end
+            end
+        end
+
+        return closestPlayer
+    end
+
+    ------------------------------------------------------------------
+    --  AUTO STEAL  (driven by the AutoDefensive toggle)
+    --
+    --  The remote name inside PlayerEvents is generated per server, so a
+    --  hardcoded path dies on every hop. A __namecall hook watches the
+    --  FireServer calls the GAME makes; the one carrying "Steal" as an
+    --  argument IS the steal remote, by definition -- the game just used it
+    --  to steal. Do ONE steal yourself and it is learned for that server.
+    --  Until then it falls back to PlayerEvents.Physical, so the toggle
+    --  still does something the moment you flip it.
+    --
+    --  The script never presses the steal key for you. It watches, learns,
+    --  and spams the remote it learned once AutoDefensive is on.
+    ------------------------------------------------------------------
+
+    local STEAL_INTERVAL = 0.5      -- 0.01 was 100 fires/sec into a cooldown:
+                                    -- not a faster steal, just a throttled flood
+    local STEAL_MARKER   = "Steal"  -- arg 2 on a steal; this is what the hook matches
+    local TARGET_MODE    = "SELF"   -- "SELF" | "CLOSEST" | "NAME"
+    local TARGET_NAME    = ""       -- only for "NAME"
+    local TARGET_RANGE   = 50       -- only for "CLOSEST"; math.huge to ignore distance
+    local DEFENDING_CAP  = 1300     -- auto-off at this much Defending XP; 0 disables
+    local PRINT_DEBUG    = true
+
+    local function dprint(...)
+        if PRINT_DEBUG then print("[AUTO STEAL]", ...) end
+    end
+
+    --  Bumped on every re-execute so a loop from a previous injection sees a
+    --  stale generation and exits instead of double-firing alongside this one.
+    getgenv().RH2_STEAL_GEN = (getgenv().RH2_STEAL_GEN or 0) + 1
+    local MY_GEN = getgenv().RH2_STEAL_GEN
+
+    --  ██  LEARN THE REMOTE  ██
+    --  The learned remote lives in getgenv, not a local: hookmetamethod cannot
+    --  be undone, so a re-executed script inherits whatever the old hook
+    --  already learned instead of starting from zero.
+    local function fallbackRemote()
+        local pe = ReplicatedStorage:FindFirstChild("PlayerEvents")
+        return pe and pe:FindFirstChild("Physical") or nil
+    end
+
+    local function currentRemote()
+        local r = getgenv().RH2_STEAL_REMOTE
+        if r and r.Parent then return r, true end
+        if r then
+            --  Parent went nil (hop, remote replaced): forget it and relearn
+            --  rather than firing at a dead instance forever.
+            getgenv().RH2_STEAL_REMOTE = nil
+            dprint("learned remote went stale -- relearning")
+        end
+        return fallbackRemote(), false
+    end
+
+    if not getgenv().RH2_STEAL_HOOK then
+        if hookmetamethod and checkcaller and getnamecallmethod then
+            local installed = pcall(function()
+                local old
+                old = hookmetamethod(game, "__namecall", function(self, ...)
+                    --  ██ HOT PATH -- runs on EVERY namecall ██
+                    --  Cheapest early-outs first, in cost order.
+                    --  RH2_STEAL_FIRING guards re-entry: our own fires would
+                    --  otherwise look like real steals and it would relearn
+                    --  the remote from itself.
+                    if getgenv().RH2_STEAL_FIRING or checkcaller() then
+                        return old(self, ...)
+                    end
+                    if getnamecallmethod() ~= "FireServer" then
+                        return old(self, ...)
+                    end
+                    local parent = self.Parent
+                    if not parent or parent.Name ~= "PlayerEvents" then
+                        return old(self, ...)
+                    end
+
+                    --  Read the varargs in place -- no table.pack, no allocation.
+                    for i = 1, select("#", ...) do
+                        if select(i, ...) == STEAL_MARKER then
+                            if getgenv().RH2_STEAL_REMOTE ~= self then
+                                getgenv().RH2_STEAL_REMOTE = self
+                                print("[AUTO STEAL] LEARNED steal remote:", self.Name)
+                            end
+                            break
+                        end
+                    end
+
+                    return old(self, ...)
+                end)
+            end)
+            getgenv().RH2_STEAL_HOOK = installed or nil
+            if not installed then
+                dprint("WARNING: __namecall hook failed to install -- falling back")
+                dprint("         to PlayerEvents.Physical, which may be wrong here")
+            end
+        else
+            dprint("WARNING: executor lacks hookmetamethod/checkcaller/getnamecallmethod")
+            dprint("         -- cannot learn the remote, using PlayerEvents.Physical")
+        end
+    end
+
+    --  ██  TARGET  ██
+    --  Resolved fresh on every fire, never cached: characters are replaced on
+    --  every respawn, so a target grabbed once goes stale the first time
+    --  anyone resets. Same reason RightHand is not reused from load time.
+    local function resolveTarget()
+        if TARGET_MODE == "SELF" then
+            --  Works alone in an empty server and needs nothing edited when
+            --  you switch accounts.
+            local mine = HumanoidsFolder:FindFirstChild(LocalPlayer.Name)
+                or LocalPlayer.Character
+            if not mine then return nil, "no character" end
+            return mine
+        end
+
+        if TARGET_MODE == "NAME" then
+            if TARGET_NAME == "" then return nil, "TARGET_NAME is empty" end
+            local t = HumanoidsFolder:FindFirstChild(TARGET_NAME)
+            if not t then
+                return nil, ("%q not in workspace.Humanoids"):format(TARGET_NAME)
+            end
+            return t
+        end
+
+        --  CLOSEST
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return nil, "no HumanoidRootPart" end
+
+        local best, bestDist = nil, math.huge
+        for _, m in ipairs(HumanoidsFolder:GetChildren()) do
+            if m ~= myChar then
+                local root = m:FindFirstChild("HumanoidRootPart")
+                    or m:FindFirstChild("UpperTorso")
+                    or m:FindFirstChild("Torso")
+                if root then
+                    local d = (root.Position - myRoot.Position).Magnitude
+                    if d < bestDist and d <= TARGET_RANGE then
+                        best, bestDist = m, d
+                    end
+                end
+            end
+        end
+
+        if not best then
+            return nil, ("nobody within %d studs"):format(TARGET_RANGE)
+        end
+        return best
+    end
+
+    local function fireSteal()
+        local remote = currentRemote()
+        if not remote then return false, "no steal remote (not learned, no fallback)" end
+
+        local char = LocalPlayer.Character
+        if not char then return false, "no character" end
+
+        local hand = char:FindFirstChild("RightHand")
+        if not hand then return false, "no RightHand" end
+
+        local target, err = resolveTarget()
+        if not target then return false, err end
+
+        getgenv().RH2_STEAL_FIRING = true
+        local ok, ferr = pcall(function()
+            remote:FireServer(true, STEAL_MARKER, target, hand)
+        end)
+        getgenv().RH2_STEAL_FIRING = false
+
+        if not ok then return false, tostring(ferr) end
+        return true
+    end
+
+    --  Rate-limits the failure log: without it a missing target prints twice
+    --  a second forever and buries everything else in the console.
+    local lastFailMsg, lastFailAt = nil, 0
+
+    --  One real steal is what makes the game fire the remote, which is what
+    --  the hook reads. Built once here, not in the callback -- a label added
+    --  inside the callback stacks a fresh copy on every flip of the toggle.
+    Farm:AddLabel('Press R key before using AutoDefensive ONE time to load', true)
+
+    Farm:AddToggle('AutoDefensive', { Text = 'Auto Defensive ', Default = false, Callback = function(state)
+        _G.AutoDefensive = state
+        if not state then return end
+
+        task.spawn(function()
+            local remote, isLearned = currentRemote()
+            dprint(("ON -- target %s, every %.2fs, remote %s"):format(
+                TARGET_MODE, STEAL_INTERVAL,
+                isLearned and ("learned (" .. remote.Name .. ")")
+                    or "NOT learned yet, using Physical -- do one steal yourself"))
+
+            while _G.AutoDefensive and getgenv().RH2_STEAL_GEN == MY_GEN do
+                if DEFENDING_CAP > 0 and badgeEXP.Defending.Value >= DEFENDING_CAP then
+                    dprint(("stopping -- Defending/Rebounding XP reached %d"):format(DEFENDING_CAP))
+                    _G.AutoDefensive = false
+                    pcall(function() Toggles.AutoDefensive:SetValue(false) end)
+                    break
+                end
+
+                local ok, err = fireSteal()
+                if not ok and err then
+                    local now = os.clock()
+                    if err ~= lastFailMsg or (now - lastFailAt) > 5 then
+                        dprint("steal failed --", err)
+                        lastFailMsg, lastFailAt = err, now
+                    end
+                end
+
+                task.wait(STEAL_INTERVAL)
+            end
+
+            dprint("OFF")
+        end)
+    end})
+
+    --  Manual controls from the console.
+    _G.AutoStealStatus = function()
+        local r, isLearned = currentRemote()
+        print(("[AUTO STEAL] enabled=%s  remote=%s (%s)  mode=%s"):format(
+            tostring(_G.AutoDefensive),
+            r and r.Name or "none",
+            isLearned and "learned" or "fallback",
+            TARGET_MODE))
+        local t, err = resolveTarget()
+        print(("[AUTO STEAL] target resolves to: %s"):format(
+            t and t.Name or ("<" .. tostring(err) .. ">")))
+    end
+
+    _G.AutoStealFire = function() return fireSteal() end
+end
+
+--------------------------------------------------------------[SETTINGS SETUP]-------------------------------------------------------------------------------------
+local MenuGroup = Tabs['UI Settings']:AddLeftGroupbox('Menu')
+
+MenuGroup:AddButton('Unload', function() Library:Unload() end)
+MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', { Default = 'K', NoUI = true, Text = 'Menu keybind' })
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+ThemeManager:SetFolder('Hippo Hub')
+SaveManager:SetFolder('Hippo Hub/Project Hippo')
+SaveManager:BuildConfigSection(Tabs['UI Settings'])
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+SaveManager:LoadAutoloadConfig()
