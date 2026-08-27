@@ -388,7 +388,7 @@ if game.PlaceId == 14269621394 then
     local TARGET_MODE    = "SELF"   -- "SELF" | "CLOSEST" | "NAME"
     local TARGET_NAME    = ""       -- only for "NAME"
     local TARGET_RANGE   = 50       -- only for "CLOSEST"; math.huge to ignore distance
-    local DEFENDING_CAP  = 900     -- auto-off at this much Defending XP; 0 disables
+    local DEFENDING_CAP  = 1250     -- auto-off at this much Defending XP; 0 disables
     local PRINT_DEBUG    = true
 
     local function dprint(...)
