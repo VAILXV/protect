@@ -208,6 +208,224 @@ end
 
 disableAFKCheck()
 
+-----------------------------------------------------------[SHARED STEAL ENGINE]-----------------------------------------------------------------------------
+--  Shared by the REC block and the Park block -- it was inlined in REC before
+--  the Park needed the same thing, so it lives out here now.
+--
+--  The remote name inside PlayerEvents is generated per server, so a hardcoded
+--  path dies on every hop. A __namecall hook watches the FireServer calls the
+--  GAME makes; the one carrying "Steal" as an argument IS the steal remote, by
+--  definition -- the game just used it to steal. Do ONE steal yourself and it
+--  is learned for that server.
+--
+--  REC has a PlayerEvents.Physical worth falling back to. The Park does NOT --
+--  its PlayerEvents holds only per-server scrambled names -- so in the Park the
+--  hook is the only way in and one manual steal is mandatory, not optional.
+--
+--  The script never presses the steal key for you. It watches, learns, and
+--  spams the remote it learned once a farm toggle is on.
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+local StealEngine = {}
+do
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local LocalPlayer = Players.LocalPlayer
+
+    StealEngine.STEAL_INTERVAL = 0.01      -- 0.01 was 100 fires/sec into a cooldown:
+                                           -- not a faster steal, just a throttled flood
+    StealEngine.STEAL_MARKER   = "Steal"   -- arg 2 on a steal; what the hook matches
+    StealEngine.TARGET_MODE    = "SELF"    -- "SELF" | "CLOSEST" | "NAME"
+    StealEngine.TARGET_NAME    = ""        -- only for "NAME"
+    StealEngine.TARGET_RANGE   = 50        -- only for "CLOSEST"; math.huge to ignore distance
+    StealEngine.PRINT_DEBUG    = true
+
+    local function dprint(...)
+        if StealEngine.PRINT_DEBUG then print("[AUTO STEAL]", ...) end
+    end
+    StealEngine.dprint = dprint
+
+    --  Bumped on every re-execute so a loop from a previous injection sees a
+    --  stale generation and exits instead of double-firing alongside this one.
+    getgenv().RH2_STEAL_GEN = (getgenv().RH2_STEAL_GEN or 0) + 1
+    local MY_GEN = getgenv().RH2_STEAL_GEN
+
+    function StealEngine.isCurrentGen()
+        return getgenv().RH2_STEAL_GEN == MY_GEN
+    end
+
+    --  ██  LEARN THE REMOTE  ██
+    --  The learned remote lives in getgenv, not a local: hookmetamethod cannot
+    --  be undone, so a re-executed script inherits whatever the old hook
+    --  already learned instead of starting from zero.
+    local function fallbackRemote()
+        local pe = ReplicatedStorage:FindFirstChild("PlayerEvents")
+        return pe and pe:FindFirstChild("Physical") or nil
+    end
+
+    function StealEngine.currentRemote()
+        local r = getgenv().RH2_STEAL_REMOTE
+        if r and r.Parent then return r, true end
+        if r then
+            --  Parent went nil (hop, remote replaced): forget it and relearn
+            --  rather than firing at a dead instance forever.
+            getgenv().RH2_STEAL_REMOTE = nil
+            dprint("learned remote went stale -- relearning")
+        end
+        return fallbackRemote(), false
+    end
+
+    if not getgenv().RH2_STEAL_HOOK then
+        if hookmetamethod and checkcaller and getnamecallmethod then
+            local installed = pcall(function()
+                local old
+                old = hookmetamethod(game, "__namecall", function(self, ...)
+                    --  ██ HOT PATH -- runs on EVERY namecall ██
+                    --  Cheapest early-outs first, in cost order.
+                    --  RH2_STEAL_FIRING guards re-entry: our own fires would
+                    --  otherwise look like real steals and it would relearn
+                    --  the remote from itself.
+                    if getgenv().RH2_STEAL_FIRING or checkcaller() then
+                        return old(self, ...)
+                    end
+                    if getnamecallmethod() ~= "FireServer" then
+                        return old(self, ...)
+                    end
+                    local parent = self.Parent
+                    if not parent or parent.Name ~= "PlayerEvents" then
+                        return old(self, ...)
+                    end
+
+                    --  Read the varargs in place -- no table.pack, no allocation.
+                    for i = 1, select("#", ...) do
+                        if select(i, ...) == StealEngine.STEAL_MARKER then
+                            if getgenv().RH2_STEAL_REMOTE ~= self then
+                                getgenv().RH2_STEAL_REMOTE = self
+                                print("[AUTO STEAL] LEARNED steal remote:", self.Name)
+                            end
+                            break
+                        end
+                    end
+
+                    return old(self, ...)
+                end)
+            end)
+            getgenv().RH2_STEAL_HOOK = installed or nil
+            if not installed then
+                dprint("WARNING: __namecall hook failed to install -- falling back")
+                dprint("         to PlayerEvents.Physical, which does not exist in the Park")
+            end
+        else
+            dprint("WARNING: executor lacks hookmetamethod/checkcaller/getnamecallmethod")
+            dprint("         -- cannot learn the remote, using PlayerEvents.Physical")
+        end
+    end
+
+    --  ██  TARGET  ██
+    --  Resolved fresh on every fire, never cached: characters are replaced on
+    --  every respawn, so a target grabbed once goes stale the first time
+    --  anyone resets. workspace.Humanoids is looked up per call rather than
+    --  waited on at load -- a WaitForChild out here would hang the whole
+    --  script in a place that has no such folder.
+    function StealEngine.resolveTarget()
+        local humanoids = workspace:FindFirstChild("Humanoids")
+
+        if StealEngine.TARGET_MODE == "SELF" then
+            --  Works alone in an empty server and needs nothing edited when
+            --  you switch accounts.
+            local mine = (humanoids and humanoids:FindFirstChild(LocalPlayer.Name))
+                or LocalPlayer.Character
+            if not mine then return nil, "no character" end
+            return mine
+        end
+
+        if not humanoids then return nil, "no workspace.Humanoids in this place" end
+
+        if StealEngine.TARGET_MODE == "NAME" then
+            if StealEngine.TARGET_NAME == "" then return nil, "TARGET_NAME is empty" end
+            local t = humanoids:FindFirstChild(StealEngine.TARGET_NAME)
+            if not t then
+                return nil, ("%q not in workspace.Humanoids"):format(StealEngine.TARGET_NAME)
+            end
+            return t
+        end
+
+        --  CLOSEST
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return nil, "no HumanoidRootPart" end
+
+        local best, bestDist = nil, math.huge
+        for _, m in ipairs(humanoids:GetChildren()) do
+            if m ~= myChar then
+                local root = m:FindFirstChild("HumanoidRootPart")
+                    or m:FindFirstChild("UpperTorso")
+                    or m:FindFirstChild("Torso")
+                if root then
+                    local d = (root.Position - myRoot.Position).Magnitude
+                    if d < bestDist and d <= StealEngine.TARGET_RANGE then
+                        best, bestDist = m, d
+                    end
+                end
+            end
+        end
+
+        if not best then
+            return nil, ("nobody within %d studs"):format(StealEngine.TARGET_RANGE)
+        end
+        return best
+    end
+
+    function StealEngine.fireSteal()
+        local remote = StealEngine.currentRemote()
+        if not remote then return false, "no steal remote (not learned, no fallback)" end
+
+        local char = LocalPlayer.Character
+        if not char then return false, "no character" end
+
+        local hand = char:FindFirstChild("RightHand")
+        if not hand then return false, "no RightHand" end
+
+        local target, err = StealEngine.resolveTarget()
+        if not target then return false, err end
+
+        getgenv().RH2_STEAL_FIRING = true
+        local ok, ferr = pcall(function()
+            remote:FireServer(true, StealEngine.STEAL_MARKER, target, hand)
+        end)
+        getgenv().RH2_STEAL_FIRING = false
+
+        if not ok then return false, tostring(ferr) end
+        return true
+    end
+
+    --  Rate-limits the failure log: without it a missing target prints twice
+    --  a second forever and buries everything else in the console.
+    local lastFailMsg, lastFailAt = nil, 0
+    function StealEngine.logFailure(err)
+        local now = os.clock()
+        if err ~= lastFailMsg or (now - lastFailAt) > 5 then
+            dprint("steal failed --", err)
+            lastFailMsg, lastFailAt = err, now
+        end
+    end
+
+    --  Manual controls from the console.
+    _G.AutoStealStatus = function()
+        local r, isLearned = StealEngine.currentRemote()
+        print(("[AUTO STEAL] rec=%s  park=%s  remote=%s (%s)  mode=%s"):format(
+            tostring(_G.AutoDefensive),
+            tostring(_G.ParkAutoDefensive),
+            r and r.Name or "none",
+            isLearned and "learned" or "fallback",
+            StealEngine.TARGET_MODE))
+        local t, err = StealEngine.resolveTarget()
+        print(("[AUTO STEAL] target resolves to: %s"):format(
+            t and t.Name or ("<" .. tostring(err) .. ">")))
+    end
+
+    _G.AutoStealFire = function() return StealEngine.fireSteal() end
+end
+
 -----------------------------------------------------------[READY-UP SETUP]-----------------------------------------------------------------------------------
 if game.PlaceId == 15297128281 then
     local reclobby = Tabs.Main:AddLeftGroupbox('Lobby')
@@ -369,197 +587,30 @@ if game.PlaceId == 14269621394 then
 
     ------------------------------------------------------------------
     --  AUTO STEAL  (driven by the AutoDefensive toggle)
-    --
-    --  The remote name inside PlayerEvents is generated per server, so a
-    --  hardcoded path dies on every hop. A __namecall hook watches the
-    --  FireServer calls the GAME makes; the one carrying "Steal" as an
-    --  argument IS the steal remote, by definition -- the game just used it
-    --  to steal. Do ONE steal yourself and it is learned for that server.
-    --  Until then it falls back to PlayerEvents.Physical, so the toggle
-    --  still does something the moment you flip it.
-    --
-    --  The script never presses the steal key for you. It watches, learns,
-    --  and spams the remote it learned once AutoDefensive is on.
+    --  The engine itself is shared -- see [SHARED STEAL ENGINE] above.
+    --  Only the cap and the UI wiring are REC-specific.
     ------------------------------------------------------------------
 
-    local STEAL_INTERVAL = 0.01      -- 0.01 was 100 fires/sec into a cooldown:
-                                    -- not a faster steal, just a throttled flood
-    local STEAL_MARKER   = "Steal"  -- arg 2 on a steal; this is what the hook matches
-    local TARGET_MODE    = "SELF"   -- "SELF" | "CLOSEST" | "NAME"
-    local TARGET_NAME    = ""       -- only for "NAME"
-    local TARGET_RANGE   = 50       -- only for "CLOSEST"; math.huge to ignore distance
-    local DEFENDING_CAP  = 1250     -- auto-off at this much Defending XP; 0 disables
-    local PRINT_DEBUG    = true
-
-    local function dprint(...)
-        if PRINT_DEBUG then print("[AUTO STEAL]", ...) end
-    end
-
-    --  Bumped on every re-execute so a loop from a previous injection sees a
-    --  stale generation and exits instead of double-firing alongside this one.
-    getgenv().RH2_STEAL_GEN = (getgenv().RH2_STEAL_GEN or 0) + 1
-    local MY_GEN = getgenv().RH2_STEAL_GEN
-
-    --  ██  LEARN THE REMOTE  ██
-    --  The learned remote lives in getgenv, not a local: hookmetamethod cannot
-    --  be undone, so a re-executed script inherits whatever the old hook
-    --  already learned instead of starting from zero.
-    local function fallbackRemote()
-        local pe = ReplicatedStorage:FindFirstChild("PlayerEvents")
-        return pe and pe:FindFirstChild("Physical") or nil
-    end
-
-    local function currentRemote()
-        local r = getgenv().RH2_STEAL_REMOTE
-        if r and r.Parent then return r, true end
-        if r then
-            --  Parent went nil (hop, remote replaced): forget it and relearn
-            --  rather than firing at a dead instance forever.
-            getgenv().RH2_STEAL_REMOTE = nil
-            dprint("learned remote went stale -- relearning")
-        end
-        return fallbackRemote(), false
-    end
-
-    if not getgenv().RH2_STEAL_HOOK then
-        if hookmetamethod and checkcaller and getnamecallmethod then
-            local installed = pcall(function()
-                local old
-                old = hookmetamethod(game, "__namecall", function(self, ...)
-                    --  ██ HOT PATH -- runs on EVERY namecall ██
-                    --  Cheapest early-outs first, in cost order.
-                    --  RH2_STEAL_FIRING guards re-entry: our own fires would
-                    --  otherwise look like real steals and it would relearn
-                    --  the remote from itself.
-                    if getgenv().RH2_STEAL_FIRING or checkcaller() then
-                        return old(self, ...)
-                    end
-                    if getnamecallmethod() ~= "FireServer" then
-                        return old(self, ...)
-                    end
-                    local parent = self.Parent
-                    if not parent or parent.Name ~= "PlayerEvents" then
-                        return old(self, ...)
-                    end
-
-                    --  Read the varargs in place -- no table.pack, no allocation.
-                    for i = 1, select("#", ...) do
-                        if select(i, ...) == STEAL_MARKER then
-                            if getgenv().RH2_STEAL_REMOTE ~= self then
-                                getgenv().RH2_STEAL_REMOTE = self
-                                print("[AUTO STEAL] LEARNED steal remote:", self.Name)
-                            end
-                            break
-                        end
-                    end
-
-                    return old(self, ...)
-                end)
-            end)
-            getgenv().RH2_STEAL_HOOK = installed or nil
-            if not installed then
-                dprint("WARNING: __namecall hook failed to install -- falling back")
-                dprint("         to PlayerEvents.Physical, which may be wrong here")
-            end
-        else
-            dprint("WARNING: executor lacks hookmetamethod/checkcaller/getnamecallmethod")
-            dprint("         -- cannot learn the remote, using PlayerEvents.Physical")
-        end
-    end
-
-    --  ██  TARGET  ██
-    --  Resolved fresh on every fire, never cached: characters are replaced on
-    --  every respawn, so a target grabbed once goes stale the first time
-    --  anyone resets. Same reason RightHand is not reused from load time.
-    local function resolveTarget()
-        if TARGET_MODE == "SELF" then
-            --  Works alone in an empty server and needs nothing edited when
-            --  you switch accounts.
-            local mine = HumanoidsFolder:FindFirstChild(LocalPlayer.Name)
-                or LocalPlayer.Character
-            if not mine then return nil, "no character" end
-            return mine
-        end
-
-        if TARGET_MODE == "NAME" then
-            if TARGET_NAME == "" then return nil, "TARGET_NAME is empty" end
-            local t = HumanoidsFolder:FindFirstChild(TARGET_NAME)
-            if not t then
-                return nil, ("%q not in workspace.Humanoids"):format(TARGET_NAME)
-            end
-            return t
-        end
-
-        --  CLOSEST
-        local myChar = LocalPlayer.Character
-        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        if not myRoot then return nil, "no HumanoidRootPart" end
-
-        local best, bestDist = nil, math.huge
-        for _, m in ipairs(HumanoidsFolder:GetChildren()) do
-            if m ~= myChar then
-                local root = m:FindFirstChild("HumanoidRootPart")
-                    or m:FindFirstChild("UpperTorso")
-                    or m:FindFirstChild("Torso")
-                if root then
-                    local d = (root.Position - myRoot.Position).Magnitude
-                    if d < bestDist and d <= TARGET_RANGE then
-                        best, bestDist = m, d
-                    end
-                end
-            end
-        end
-
-        if not best then
-            return nil, ("nobody within %d studs"):format(TARGET_RANGE)
-        end
-        return best
-    end
-
-    local function fireSteal()
-        local remote = currentRemote()
-        if not remote then return false, "no steal remote (not learned, no fallback)" end
-
-        local char = LocalPlayer.Character
-        if not char then return false, "no character" end
-
-        local hand = char:FindFirstChild("RightHand")
-        if not hand then return false, "no RightHand" end
-
-        local target, err = resolveTarget()
-        if not target then return false, err end
-
-        getgenv().RH2_STEAL_FIRING = true
-        local ok, ferr = pcall(function()
-            remote:FireServer(true, STEAL_MARKER, target, hand)
-        end)
-        getgenv().RH2_STEAL_FIRING = false
-
-        if not ok then return false, tostring(ferr) end
-        return true
-    end
-
-    --  Rate-limits the failure log: without it a missing target prints twice
-    --  a second forever and buries everything else in the console.
-    local lastFailMsg, lastFailAt = nil, 0
+    local DEFENDING_CAP = 999       -- auto-off at this much Defending XP; 0 disables
+    local dprint = StealEngine.dprint
 
     --  One real steal is what makes the game fire the remote, which is what
     --  the hook reads. Built once here, not in the callback -- a label added
     --  inside the callback stacks a fresh copy on every flip of the toggle.
-    Farm:AddLabel('Press R key before using AutoDefensive ONE time to load', true)
+    Farm:AddLabel('Press R key before using AutoDefensive ONE time to load (Z) to turn on', true)
 
     Farm:AddToggle('AutoDefensive', { Text = 'Auto Defensive ', Default = false, Callback = function(state)
         _G.AutoDefensive = state
         if not state then return end
 
         task.spawn(function()
-            local remote, isLearned = currentRemote()
+            local remote, isLearned = StealEngine.currentRemote()
             dprint(("ON -- target %s, every %.2fs, remote %s"):format(
-                TARGET_MODE, STEAL_INTERVAL,
+                StealEngine.TARGET_MODE, StealEngine.STEAL_INTERVAL,
                 isLearned and ("learned (" .. remote.Name .. ")")
                     or "NOT learned yet, using Physical -- do one steal yourself"))
 
-            while _G.AutoDefensive and getgenv().RH2_STEAL_GEN == MY_GEN do
+            while _G.AutoDefensive and StealEngine.isCurrentGen() do
                 if DEFENDING_CAP > 0 and badgeEXP.Defending.Value >= DEFENDING_CAP then
                     dprint(("stopping -- Defending/Rebounding XP reached %d"):format(DEFENDING_CAP))
                     _G.AutoDefensive = false
@@ -567,36 +618,134 @@ if game.PlaceId == 14269621394 then
                     break
                 end
 
-                local ok, err = fireSteal()
-                if not ok and err then
-                    local now = os.clock()
-                    if err ~= lastFailMsg or (now - lastFailAt) > 5 then
-                        dprint("steal failed --", err)
-                        lastFailMsg, lastFailAt = err, now
-                    end
-                end
+                local ok, err = StealEngine.fireSteal()
+                if not ok and err then StealEngine.logFailure(err) end
 
-                task.wait(STEAL_INTERVAL)
+                task.wait(StealEngine.STEAL_INTERVAL)
             end
 
             dprint("OFF")
         end)
     end})
+end
 
-    --  Manual controls from the console.
-    _G.AutoStealStatus = function()
-        local r, isLearned = currentRemote()
-        print(("[AUTO STEAL] enabled=%s  remote=%s (%s)  mode=%s"):format(
-            tostring(_G.AutoDefensive),
-            r and r.Name or "none",
-            isLearned and "learned" or "fallback",
-            TARGET_MODE))
-        local t, err = resolveTarget()
-        print(("[AUTO STEAL] target resolves to: %s"):format(
-            t and t.Name or ("<" .. tostring(err) .. ">")))
+-----------------------------------------------------------[PARK SET-UP]-------------------------------------------------------------------------------------
+--  Park. Live check says the Park serves PlaceId 13272886093; 8026790371 is
+--  kept as an alias in case a second Park place exists.
+if game.PlaceId == 13272886093 or game.PlaceId == 8026790371 then
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local LocalPlayer = Players.LocalPlayer
+    local dprint = StealEngine.dprint
+
+    local ParkFarm = Tabs.Main:AddLeftGroupbox('Park Farm')
+
+    local DEFENDING_CAP = 999       -- auto-off at this much Defending XP; 0 disables
+
+    --  ReplicatedStorage.PlayerStats holds one entry per player, keyed by
+    --  username -- a StringValue with children, not a Folder, so index it by
+    --  name and do not assume a Folder class. Re-resolved whenever the cached
+    --  instance loses its Parent: a server hop replaces the whole subtree, and
+    --  a stale IntValue would keep reading the old server's number forever.
+    local cachedBadge
+    local function getDefendingXP()
+        if cachedBadge and cachedBadge.Parent then return cachedBadge end
+        local stats = ReplicatedStorage:FindFirstChild("PlayerStats")
+        local mine = stats and stats:FindFirstChild(LocalPlayer.Name)
+        local badge = mine and mine:FindFirstChild("BadgeEXP")
+        cachedBadge = badge and badge:FindFirstChild("Defending_Rebounding") or nil
+        return cachedBadge
     end
 
-    _G.AutoStealFire = function() return fireSteal() end
+    --  Backpack.InGame is a BoolValue: false out in the plaza, true once a
+    --  game actually starts. Looked up fresh each check -- the Backpack
+    --  survives respawns but the flag is rebuilt, and a captured reference
+    --  would freeze the gate at whatever it read at load time.
+    local function isInGame()
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        local flag = bp and bp:FindFirstChild("InGame")
+        return flag ~= nil and flag.Value == true
+    end
+
+    local xpLabel = ParkFarm:AddLabel("Defensive XP: --", true)
+    local stateLabel = ParkFarm:AddLabel("Status: idle", true)
+
+    local function refreshXPLabel()
+        local v = getDefendingXP()
+        xpLabel:SetText("Defensive XP: " .. (v and tostring(v.Value) or "--"))
+    end
+
+    --  Polls for the value rather than binding once: PlayerStats fills in
+    --  after join, and the subtree is swapped on a hop, so the listener has to
+    --  be re-bound to whatever instance is live now.
+    task.spawn(function()
+        local bound
+        while StealEngine.isCurrentGen() do
+            local v = getDefendingXP()
+            if v and v ~= bound then
+                bound = v
+                refreshXPLabel()
+                v:GetPropertyChangedSignal("Value"):Connect(refreshXPLabel)
+            end
+            task.wait(2)
+        end
+    end)
+
+    ParkFarm:AddLabel('Steal ONE time in a game first -- the Park has no', true)
+    ParkFarm:AddLabel('fallback remote, so nothing fires until it is learned', true)
+
+    ParkFarm:AddToggle('ParkAutoDefensive', { Text = 'Auto Defensive (Park)', Default = false, Callback = function(state)
+        _G.ParkAutoDefensive = state
+        if not state then
+            stateLabel:SetText("Status: idle")
+            return
+        end
+
+        task.spawn(function()
+            local remote, isLearned = StealEngine.currentRemote()
+            dprint(("PARK ON -- target %s, every %.2fs, remote %s"):format(
+                StealEngine.TARGET_MODE, StealEngine.STEAL_INTERVAL,
+                isLearned and ("learned (" .. remote.Name .. ")")
+                    or "NOT learned yet -- steal once yourself in a game"))
+
+            local pauseLogged = false
+            while _G.ParkAutoDefensive and StealEngine.isCurrentGen() do
+                if not isInGame() then
+                    --  Paused, not stopped: the toggle stays on through the
+                    --  plaza and picks straight back up when the next game
+                    --  starts, so it does not have to be re-flipped each time.
+                    if not pauseLogged then
+                        stateLabel:SetText("Status: waiting for InGame")
+                        dprint("paused -- Backpack.InGame is false")
+                        pauseLogged = true
+                    end
+                    task.wait(0.5)
+                else
+                    if pauseLogged then
+                        dprint("resumed -- InGame is true")
+                        pauseLogged = false
+                    end
+
+                    local xp = getDefendingXP()
+                    if DEFENDING_CAP > 0 and xp and xp.Value >= DEFENDING_CAP then
+                        dprint(("stopping -- Defending/Rebounding XP reached %d"):format(DEFENDING_CAP))
+                        _G.ParkAutoDefensive = false
+                        pcall(function() Toggles.ParkAutoDefensive:SetValue(false) end)
+                        break
+                    end
+
+                    stateLabel:SetText("Status: farming")
+                    local ok, err = StealEngine.fireSteal()
+                    if not ok and err then StealEngine.logFailure(err) end
+
+                    task.wait(StealEngine.STEAL_INTERVAL)
+                end
+            end
+
+            stateLabel:SetText("Status: idle")
+            dprint("PARK OFF")
+        end)
+    end})
 end
 
 --------------------------------------------------------------[SETTINGS SETUP]-------------------------------------------------------------------------------------
