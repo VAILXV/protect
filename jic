@@ -225,6 +225,24 @@ disableAFKCheck()
 --  The script never presses the steal key for you. It watches, learns, and
 --  spams the remote it learned once a farm toggle is on.
 --------------------------------------------------------------------------------------------------------------------------------------------------------------
+--  Both engines fire remotes themselves, and both ride the ONE __namecall hook
+--  below. This flag tells that hook "this call is ours" so it never relearns a
+--  remote from our own traffic. RH2_STEAL_FIRING is set alongside it purely so
+--  a hook left behind by an older injection still recognises us.
+local function setAutoFiring(on)
+    getgenv().RH2_AUTO_FIRING  = on
+    getgenv().RH2_STEAL_FIRING = on
+end
+
+--  Marker string the game sends as an argument -> the getgenv slot the remote
+--  that sent it is stored in. One hook learns every action listed here, so
+--  shooting costs nothing extra on the hot path: it is one more table lookup
+--  on a string we were already comparing.
+local LEARN_SLOTS = {
+    Steal    = "RH2_STEAL_REMOTE",
+    Shooting = "RH2_SHOOT_REMOTE",
+}
+
 local StealEngine = {}
 do
     local Players = game:GetService("Players")
@@ -274,17 +292,29 @@ do
         return fallbackRemote(), false
     end
 
-    if not getgenv().RH2_STEAL_HOOK then
+    --  Versioned, not a plain boolean: a hook installed by an older injection
+    --  would otherwise block this one from ever going in. A newer hook simply
+    --  layers on top -- the old one still runs underneath through old(...).
+    --
+    --  ██ BUMP THIS NUMBER WHENEVER LEARN_SLOTS CHANGES ██
+    --  The installed hook closes over the LEARN_SLOTS table it was built with,
+    --  so editing the table does nothing to a hook that is already in. Leaving
+    --  the version alone after adding Shooting back is exactly that bug: the
+    --  old steal-only hook stayed resident and no amount of shooting could
+    --  load the shoot remote until Roblox itself was restarted.
+    local HOOK_VER = 3
+    if getgenv().RH2_HOOK_VER ~= HOOK_VER then
         if hookmetamethod and checkcaller and getnamecallmethod then
             local installed = pcall(function()
                 local old
                 old = hookmetamethod(game, "__namecall", function(self, ...)
                     --  ██ HOT PATH -- runs on EVERY namecall ██
                     --  Cheapest early-outs first, in cost order.
-                    --  RH2_STEAL_FIRING guards re-entry: our own fires would
-                    --  otherwise look like real steals and it would relearn
-                    --  the remote from itself.
-                    if getgenv().RH2_STEAL_FIRING or checkcaller() then
+                    --  RH2_AUTO_FIRING guards re-entry: our own fires would
+                    --  otherwise look like real actions and it would relearn
+                    --  the remotes from itself.
+                    if getgenv().RH2_AUTO_FIRING or getgenv().RH2_STEAL_FIRING
+                        or checkcaller() then
                         return old(self, ...)
                     end
                     if getnamecallmethod() ~= "FireServer" then
@@ -297,12 +327,17 @@ do
 
                     --  Read the varargs in place -- no table.pack, no allocation.
                     for i = 1, select("#", ...) do
-                        if select(i, ...) == StealEngine.STEAL_MARKER then
-                            if getgenv().RH2_STEAL_REMOTE ~= self then
-                                getgenv().RH2_STEAL_REMOTE = self
-                                print("[AUTO STEAL] LEARNED steal remote:", self.Name)
+                        local a = select(i, ...)
+                        if type(a) == "string" then
+                            local slot = LEARN_SLOTS[a]
+                            if slot then
+                                if getgenv()[slot] ~= self then
+                                    getgenv()[slot] = self
+                                    print(("[AUTO FARM] LEARNED %s remote: %s")
+                                        :format(a, self.Name))
+                                end
+                                break
                             end
-                            break
                         end
                     end
 
@@ -310,6 +345,7 @@ do
                 end)
             end)
             getgenv().RH2_STEAL_HOOK = installed or nil
+            getgenv().RH2_HOOK_VER   = installed and HOOK_VER or nil
             if not installed then
                 dprint("WARNING: __namecall hook failed to install -- falling back")
                 dprint("         to PlayerEvents.Physical, which does not exist in the Park")
@@ -388,11 +424,11 @@ do
         local target, err = StealEngine.resolveTarget()
         if not target then return false, err end
 
-        getgenv().RH2_STEAL_FIRING = true
+        setAutoFiring(true)
         local ok, ferr = pcall(function()
             remote:FireServer(true, StealEngine.STEAL_MARKER, target, hand)
         end)
-        getgenv().RH2_STEAL_FIRING = false
+        setAutoFiring(false)
 
         if not ok then return false, tostring(ferr) end
         return true
@@ -424,6 +460,385 @@ do
     end
 
     _G.AutoStealFire = function() return StealEngine.fireSteal() end
+end
+
+-----------------------------------------------------------[SHARED SHOOT ENGINE]----------------------------------------------------------------------------
+--  This does NOT shoot for you. It multiplies the shots you take yourself:
+--  toggle it on, set how many events each charge is worth, then shoot.
+--
+--  The remote is LOADED the same way the steal one is: the same __namecall
+--  hook watches for a FireServer carrying "Shooting", so one real shot teaches
+--  it the name for that server. PlayerEvents.Shooting is tried first and is
+--  enough on servers that still expose the plain name; where it is scrambled
+--  the hook is the only way in and one manual shot is required.
+--
+--  TIMING is the part that actually mattered. The server only accepts a shot
+--  event while the shot is CHARGING; fired after the release it lands on
+--  nothing, which is why the old code could run a full multiplier and move no
+--  XP. So the multiplier rides the rising ticks of Backpack.ActionValues.Power
+--  -- the charge meter filling while E is held.
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+local ShootEngine = {}
+do
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local LocalPlayer = Players.LocalPlayer
+
+    ShootEngine.SHOOT_MARKER  = "Shooting"        -- arg 2 on a shot
+    ShootEngine.SHOT_TYPE     = "Standing Shot"   -- arg 3
+    ShootEngine.BURST_DELAY   = 0                 -- the charge is short; do not spend it waiting
+    ShootEngine.MULT_VALUES   = { '1', '25', '45', '65' }
+    ShootEngine.DEFAULT_MULT  = 1                 -- until the dropdown has been read
+    ShootEngine.DEFAULT_POWER = 50                -- until the slider has been read
+    ShootEngine.PRINT_DEBUG   = true
+
+    --  The on-screen warning that runs while the multiplier is live.
+    ShootEngine.WARN_TEXT  = "⚠ SHOOTING XP ON ⚠"
+    ShootEngine.WARN_HZ    = 1.5    -- flashes per second
+    ShootEngine.WARN_MIN_T = 0.3    -- most solid the letters get
+    ShootEngine.WARN_MAX_T = 0.9    -- faintest
+
+    local function dprint(...)
+        if ShootEngine.PRINT_DEBUG then print("[AUTO SHOOT]", ...) end
+    end
+    ShootEngine.dprint = dprint
+
+    --  ██  LOAD THE REMOTE  ██
+    --  Learned first, PlayerEvents.Shooting second. The plain name works on
+    --  the servers that still expose it, but where the name is scrambled it
+    --  resolves to nothing and the multiplier fires into thin air -- so the
+    --  same __namecall hook that learns Steal also watches for "Shooting".
+    --  Take ONE real shot (hold E) and it is loaded for that server.
+    --
+    --  The learned remote lives in getgenv, not a local: hookmetamethod cannot
+    --  be undone, so a re-executed script inherits whatever the old hook
+    --  already learned instead of starting from zero.
+    --
+    --  PlayerEvents is looked for in the BACKPACK as well as ReplicatedStorage,
+    --  in that order -- which is where the original code looked first, and it
+    --  is the difference between the remote being there the moment the script
+    --  loads and having to shoot to teach it. Nothing here needs the toggle or
+    --  a shot; both are only the last resort for a server that scrambles the
+    --  name.
+    local function fallbackRemote()
+        local containers = {
+            LocalPlayer:FindFirstChild("Backpack"),
+            ReplicatedStorage,
+        }
+        for _, where in ipairs(containers) do
+            if where then
+                local pe = where:FindFirstChild("PlayerEvents")
+                local r = pe and pe:FindFirstChild("Shooting")
+                if r then return r end
+            end
+        end
+        return nil
+    end
+
+    function ShootEngine.currentRemote()
+        local r = getgenv().RH2_SHOOT_REMOTE
+        if r and r.Parent then return r, true end
+        if r then
+            --  Parent went nil (hop, remote replaced): forget it and relearn
+            --  rather than firing at a dead instance forever.
+            getgenv().RH2_SHOOT_REMOTE = nil
+            dprint("loaded remote went stale -- reloading")
+        end
+        return fallbackRemote(), false
+    end
+
+    --  Resolved per call, never captured: the Backpack survives a respawn but
+    --  ActionValues is rebuilt, so a reference grabbed at load points at a
+    --  dead instance the first time you reset -- which is the other half of
+    --  why the old version stopped working after one death.
+    function ShootEngine.powerValue()
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        local av = bp and bp:FindFirstChild("ActionValues")
+        return av and av:FindFirstChild("Power") or nil
+    end
+
+    --  Both read at fire time, never captured: the point of the controls is
+    --  that you can change them mid-game and the next charge uses the new
+    --  numbers. The dropdown hands back its value as a STRING, hence tonumber.
+    function ShootEngine.multiplier()
+        local opt = Options and Options.Multiplier
+        local v = opt and tonumber(opt.Value) or ShootEngine.DEFAULT_MULT
+        return math.max(1, math.floor(v))
+    end
+
+    --  Power the charge has to reach before anything fires -- the "Value"
+    --  slider. Below it the charge is still winding up and the shot the server
+    --  would credit is a weak one.
+    function ShootEngine.minPower()
+        local opt = Options and Options.ChangeValue
+        local v = opt and tonumber(opt.Value) or ShootEngine.DEFAULT_POWER
+        return math.max(1, v)
+    end
+
+    function ShootEngine.fireBurst(count)
+        local remote = ShootEngine.currentRemote()
+        if not remote then return 0, "shoot remote not loaded -- take one real shot" end
+
+        count = count or ShootEngine.multiplier()
+        local sent = 0
+
+        setAutoFiring(true)
+        for i = 1, count do
+            if not remote.Parent then
+                remote = ShootEngine.currentRemote()
+                if not remote then break end
+            end
+
+            local ok = pcall(function()
+                remote:FireServer(false, ShootEngine.SHOOT_MARKER, ShootEngine.SHOT_TYPE)
+            end)
+            if not ok then break end
+            sent = sent + 1
+
+            if ShootEngine.BURST_DELAY > 0 and i < count then
+                task.wait(ShootEngine.BURST_DELAY)
+            end
+        end
+        setAutoFiring(false)
+
+        return sent
+    end
+
+    --  Spawned ONCE per place block. countFn is asked how many extra fires this
+    --  charge is worth and returns 0 to sit the shot out, so REC and the Park
+    --  can each add their own gating without the engine knowing about either.
+    function ShootEngine.spawnDriver(tag, countFn, onBurst)
+        task.spawn(function()
+            local bound, conn, lastPower = nil, nil, 0
+
+            while StealEngine.isCurrentGen() do
+                local power = ShootEngine.powerValue()
+
+                if power ~= bound then
+                    if conn then conn:Disconnect() conn = nil end
+                    bound = power
+
+                    if power then
+                        lastPower = power.Value
+                        conn = power:GetPropertyChangedSignal("Value"):Connect(function()
+                            local v = power.Value
+                            local rising = v > lastPower
+                            lastPower = v
+
+                            --  Rising edge only: the charge building, not it
+                            --  dropping back to zero on release.
+                            if not rising or v < ShootEngine.minPower() then return end
+                            --  Our own fires can move Power; without this the
+                            --  handler re-enters itself and multiplies.
+                            if getgenv().RH2_AUTO_FIRING then return end
+
+                            local count = countFn()
+                            if not count or count < 1 then return end
+
+                            local sent, err = ShootEngine.fireBurst(count)
+                            if onBurst then onBurst(sent, err) end
+                        end)
+                        dprint(tag .. ": bound to Backpack.ActionValues.Power")
+                    end
+                end
+
+                task.wait(1)
+            end
+
+            if conn then conn:Disconnect() end
+            dprint(tag .. ": driver exited (stale generation)")
+        end)
+    end
+
+    --  ██  ON-SCREEN WARNING  ██
+    --  Big translucent red letters, pulsing, for as long as the multiplier is
+    --  on -- so a farm left running is never mistaken for a clean session.
+    --
+    --  Parented to the executor's hidden container where there is one, so it
+    --  does not sit in PlayerGui for anything walking the tree; CoreGui and
+    --  then PlayerGui are the fallbacks.
+    local function warnParent()
+        if gethui then
+            local ok, hui = pcall(gethui)
+            if ok and hui then return hui end
+        end
+        local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+        if ok and cg then return cg end
+        return LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    end
+
+    local warnGui, warnConn
+    function ShootEngine.setWarning(on)
+        if not on then
+            if warnConn then warnConn:Disconnect() warnConn = nil end
+            if warnGui then pcall(function() warnGui:Destroy() end) warnGui = nil end
+            return
+        end
+
+        if warnGui and warnGui.Parent then return end   -- already up
+
+        local built = pcall(function()
+            local gui = Instance.new("ScreenGui")
+            gui.Name = "RH2_ShootWarn"
+            gui.IgnoreGuiInset = true
+            gui.ResetOnSpawn = false        -- must survive a reset, or it lies
+            gui.DisplayOrder = 10000
+
+            local label = Instance.new("TextLabel")
+            label.BackgroundTransparency = 1
+            label.Active = false            -- never eat a click meant for the game
+            label.Size = UDim2.fromScale(1, 0.22)
+            label.Position = UDim2.fromScale(0, 0.30)
+            label.Font = Enum.Font.GothamBlack
+            label.Text = ShootEngine.WARN_TEXT
+            label.TextScaled = true
+            label.TextColor3 = Color3.fromRGB(255, 25, 25)
+            label.TextStrokeColor3 = Color3.new(0, 0, 0)
+            label.TextStrokeTransparency = 0.5
+            label.TextTransparency = ShootEngine.WARN_MIN_T
+            label.Parent = gui
+
+            gui.Parent = warnParent()
+            warnGui = gui
+
+            --  Transparency is pulsed rather than Visible flipped: a hard blink
+            --  filling the screen is punishing to sit behind for a whole farm,
+            --  and reads as the same warning. Heartbeat, not RenderStepped --
+            --  1.5Hz does not need a pre-render slot.
+            local t0 = os.clock()
+            warnConn = game:GetService("RunService").Heartbeat:Connect(function()
+                --  A re-execute makes this generation stale; tear the old
+                --  overlay down rather than leaving two pulsing on top of
+                --  each other out of phase.
+                if not StealEngine.isCurrentGen() then
+                    ShootEngine.setWarning(false)
+                    return
+                end
+                if not label.Parent then return end
+
+                local phase = (math.sin((os.clock() - t0) * ShootEngine.WARN_HZ * math.pi * 2) + 1) / 2
+                label.TextTransparency = ShootEngine.WARN_MIN_T
+                    + (ShootEngine.WARN_MAX_T - ShootEngine.WARN_MIN_T) * phase
+                label.TextStrokeTransparency = 0.4 + 0.5 * phase
+            end)
+        end)
+
+        if not built then
+            dprint("warning overlay failed to build -- multiplier still runs")
+        end
+    end
+
+    local lastFailMsg, lastFailAt = nil, 0
+    function ShootEngine.logFailure(err)
+        local now = os.clock()
+        if err ~= lastFailMsg or (now - lastFailAt) > 5 then
+            dprint("shot failed --", err)
+            lastFailMsg, lastFailAt = err, now
+        end
+    end
+
+    --  Builds the toggle and its slider, and starts the driver behind them.
+    --  gate() is an extra per-place condition; pass nil where there is none.
+    --  Only one place block ever runs in a session, so the controls keep plain
+    --  names and stay readable in a saved config.
+    function ShootEngine.attach(groupbox, tag, gate)
+        --  Indexed 'ShootingXP', not 'Shooting XP': the index is what the rest
+        --  of the script says (Toggles.ShootingXP) and what a saved config
+        --  keys on, and a space there is a trap. The visible text is the Text
+        --  field, so nothing on screen changes.
+        groupbox:AddToggle('ShootingXP', {
+            Text = 'Shot Multi', Default = false,
+            Callback = function(state)
+                _G.ShootingXP = state
+                ShootEngine.setWarning(state)
+
+                if not state then
+                    dprint(tag .. ": OFF")
+                    return
+                end
+
+                local remote, isLoaded = ShootEngine.currentRemote()
+                dprint(("%s: ON -- %d per charge above power %d, remote %s"):format(
+                    tag, ShootEngine.multiplier(), ShootEngine.minPower(),
+                    remote and (isLoaded and ("loaded (" .. remote.Name .. ")")
+                            or ("fallback (" .. remote.Name .. ")"))
+                        or "NOT LOADED -- take one real shot to load it"))
+            end,
+        })
+
+        --  Says whether the remote is in hand yet. Kept to a few words on
+        --  purpose: the groupbox is narrow and the scrambled remote names are
+        --  long, so the name itself stays in _G.ShootStatus() where it has
+        --  room. Wrapping is on so a theme with wider padding cannot clip it.
+        local remoteLabel = groupbox:AddLabel('Remote: checking...', true)
+
+        --  Polled rather than set once: there is nothing to report until that
+        --  first shot, and a hop drops the remote, so this has to be able to
+        --  go backwards too.
+        task.spawn(function()
+            local shown
+            while StealEngine.isCurrentGen() do
+                local r, isLoaded = ShootEngine.currentRemote()
+                local text
+                if r and isLoaded then
+                    text = 'Remote: LOADED (learned)'
+                elseif r then
+                    text = 'Remote: LOADED (auto)'
+                else
+                    text = 'Remote: not loaded - shoot once'
+                end
+
+                if text ~= shown then
+                    shown = text
+                    remoteLabel:SetText(text)
+                    dprint(tag .. ": " .. text)
+                end
+                task.wait(1)
+            end
+        end)
+
+        groupbox:AddSlider('ChangeValue', {
+            Text = 'Value', Default = ShootEngine.DEFAULT_POWER,
+            Min = 1, Max = 100, Rounding = 0, Compact = true,
+        })
+
+        --  Default is an INDEX into Values, so 1 selects '1'. The old code
+        --  passed 100 here, which is off the end of a four-entry list.
+        groupbox:AddDropdown('Multiplier', {
+            Values = ShootEngine.MULT_VALUES, Default = 1, Multi = false,
+            Text = 'Ammount',
+        })
+
+        --  Unloading the menu has to take the overlay with it, or it pulses
+        --  over the screen with nothing left to switch it off.
+        pcall(function()
+            Library:OnUnload(function() ShootEngine.setWarning(false) end)
+        end)
+
+        ShootEngine.spawnDriver(tag, function()
+            if not _G.ShootingXP then return 0 end
+            if gate and not gate() then return 0 end
+            return ShootEngine.multiplier()
+        end, function(sent, err)
+            if sent == 0 and err then ShootEngine.logFailure(err) end
+        end)
+    end
+
+    _G.ShootStatus = function()
+        local r, isLoaded = ShootEngine.currentRemote()
+        print(("[AUTO SHOOT] on=%s  remote=%s (%s)  multiplier=%d  minPower=%d"):format(
+            tostring(_G.ShootingXP),
+            r and r.Name or "NOT LOADED",
+            isLoaded and "loaded" or "fallback",
+            ShootEngine.multiplier(),
+            ShootEngine.minPower()))
+        local p = ShootEngine.powerValue()
+        print(("[AUTO SHOOT] Power reads: %s"):format(p and tostring(p.Value) or "<not found>"))
+    end
+
+    --  Fire the shot remote by hand, e.g. _G.ShootFire(50). Only lands while a
+    --  shot is actually charging -- see the timing note at the top.
+    _G.ShootFire = function(count) return ShootEngine.fireBurst(count) end
 end
 
 -----------------------------------------------------------[READY-UP SETUP]-----------------------------------------------------------------------------------
@@ -467,66 +882,7 @@ end
 
 -----------------------------------------------------------[REC SET-UP]-----------------------------------------------------------------------------------
 if game.PlaceId == 14269621394 then
-    local Config = Tabs.Main:AddLeftGroupbox('Config')
-	Config:AddToggle("Xp", { Text = "doesnt work", Callback = function(state)
-        if state then
-            spawn(function()
-                while Toggles.Xp.Value do
-                    Library:Notify("TURN IT OFF", 1)
-                    wait(1)
-                end
-            end)
-        end
-    end })
-    --Config:AddSlider("ChangeValue", { Text = "Value", Default = 50, Min = 1, Max = 100, Rounding = 1, Compact = true })
-    --Config:AddDropdown('Multiplier', { Values = { '1', '2', '5', '65' }, Default = 100, Multi = false, Text = 'Ammount' })
-    
     local Farm = Tabs.Main:AddLeftGroupbox('Farm')
-
-    local Players = game:GetService("Players")
-    local ReplicatedStorage = game:GetService("ReplicatedStorage")
-    local Workspace = game:GetService("Workspace")
-    local localPlayer = Players.LocalPlayer
-
-    local backpack = localPlayer:WaitForChild("Backpack")
-    local actionValues = backpack:WaitForChild("ActionValues")
-    local power = actionValues:WaitForChild("Power")
-
-    local connection
-
-    local function onPowerChanged()
-        if power.Value >= Options.ChangeValue.Value and _G.Xp then
-            local args = {
-                [1] = false,
-                [2] = "Shooting",
-                [3] = "Standing Shot"
-            }
-
-            local shotMultiplier = _G.Multiplier
-
-            local playerEvents = backpack:FindFirstChild("PlayerEvents") or ReplicatedStorage:FindFirstChild("PlayerEvents")
-
-            if playerEvents then
-                local shootingEvent = playerEvents:FindFirstChild("Shooting")
-                if shootingEvent then
-                    for i = 1, shotMultiplier do
-                        shootingEvent:FireServer(unpack(args))
-                    end
-                end
-            end
-        end
-    end
-
-    connection = power:GetPropertyChangedSignal("Value"):Connect(onPowerChanged)
-
-    --[[Toggles.Xp:OnChanged(function() _G.Xp = Toggles.Xp.Value end)
-    Toggles.Xp:SetValue(false)
-    Options.Multiplier:OnChanged(function() _G.Multiplier = Options.Multiplier.Value end) 
-    _G.Multiplier = Options.Multiplier.Value
-    Options.ChangeValue:OnChanged(function() _G.ChangeValue = Options.ChangeValue.Value end) 
-    _G.ChangeValue = Options.ChangeValue.Value]]
-
-
     local Test = Tabs.Main:AddLeftGroupbox('Badge Progress')
     local Players = game:GetService("Players")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -627,6 +983,15 @@ if game.PlaceId == 14269621394 then
             dprint("OFF")
         end)
     end})
+
+    ------------------------------------------------------------------
+    --  SHOT MULTIPLIER
+    --  Toggle, power threshold, and amount. Flashes a warning on screen
+    --  while it is on. The engine is shared; see [SHARED SHOOT ENGINE].
+    ------------------------------------------------------------------
+
+    local Config = Tabs.Main:AddLeftGroupbox('Config')
+    ShootEngine.attach(Config, "rec")
 end
 
 -----------------------------------------------------------[PARK SET-UP]-------------------------------------------------------------------------------------
@@ -640,7 +1005,7 @@ if game.PlaceId == 13272886093 or game.PlaceId == 8026790371 then
 
     local ParkFarm = Tabs.Main:AddLeftGroupbox('Park Farm')
 
-    local DEFENDING_CAP = 999       -- auto-off at this much Defending XP; 0 disables
+    local DEFENDING_CAP = 1200       -- auto-off at this much Defending XP; 0 disables
 
     --  ReplicatedStorage.PlayerStats holds one entry per player, keyed by
     --  username -- a StringValue with children, not a Folder, so index it by
@@ -746,6 +1111,7 @@ if game.PlaceId == 13272886093 or game.PlaceId == 8026790371 then
             dprint("PARK OFF")
         end)
     end})
+
 end
 
 --------------------------------------------------------------[SETTINGS SETUP]-------------------------------------------------------------------------------------
